@@ -1,0 +1,18 @@
+{
+  "name": "com.bigicegames.big.unity.overlay",
+  "version": "0.1.0",
+  "displayName": "BIG.Unity.Overlay",
+  "description": "Desktop overlay toolkit for the BIG ecosystem: transparent always-on-top window snapped to screen corners, monitor selection, geometry-based click-through, drag handle with corner snapping, global scroll without focus and Windows autostart. REQUIRES BIG.Unity and UniWinC (free, MIT).",
+  "unity": "2022.3",
+  "license": "MIT",
+  "dependencies": {},
+  "author": {
+    "name": "BigIceGames"
+  },
+  "keywords": [
+    "big",
+    "overlay",
+    "window",
+    "transparent"
+  ]
+}

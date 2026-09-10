@@ -1,0 +1,27 @@
+{
+    "name": "BIG.Unity.Overlay",
+    "rootNamespace": "BIG.Unity.Overlay",
+    "references": [
+        "BIG.Unity",
+        "Kirurobo.UniWindowController",
+        "UnityEngine.UI",
+        "Unity.InputSystem"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [
+        "BIG_UNIWINC"
+    ],
+    "versionDefines": [
+        {
+            "name": "com.kirurobo.uniwinc",
+            "expression": "",
+            "define": "BIG_UNIWINC"
+        }
+    ],
+    "noEngineReferences": false
+}

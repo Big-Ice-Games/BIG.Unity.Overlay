@@ -1,0 +1,9 @@
+root = true
+
+# [Inject] fields are assigned by BIG's reflection-based DI at runtime — "unassigned field" / "make readonly"
+# hints are false positives for package sources in plain Visual Studio (Rider understands the JetBrains
+# annotations embedded in BIG.dll and needs no overrides).
+
+[*.cs]
+dotnet_diagnostic.IDE0044.severity = none
+dotnet_diagnostic.CS0649.severity = none
