@@ -4,6 +4,7 @@ using Kirurobo;
 using UnityEngine;
 using UnityEngine.Events;
 using UnityEngine.EventSystems;
+using UnityEngine.UI;
 #if ODIN_INSPECTOR
 using Sirenix.OdinInspector;
 #endif
@@ -91,7 +92,7 @@ namespace BIG.Unity.Overlay
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: a press on an interactive element (button, slider, anything with pointer/drag handlers, e.g. a chess piece) never starts the drag. Counts as hit area automatically.")]
+        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: presses on Selectables (buttons, sliders...) never start the drag, and the game can reclaim a gesture with CancelDrag() (e.g. when a chess piece got picked up). Counts as hit area automatically.")]
         private RectTransform _moveHandle;
 
 #if ODIN_INSPECTOR
@@ -142,8 +143,15 @@ namespace BIG.Unity.Overlay
         private bool _lastClickThrough = true;
         private bool _cursorOver;
 
+        // Drag starts ARMED on press and moves the content only after the cursor travels DRAG_THRESHOLD
+        // pixels — a plain click never nudges the content, and uGUI (piece drag) gets time to claim the gesture.
+        private const float DRAG_THRESHOLD = 8f;
+
+        private bool _dragArmed;
         private bool _dragging;
         private bool _mouseWasPressed;
+        private Vector2 _pressScreenPoint;
+        private Vector2 _dragStartContentPosition;
         private Vector2 _dragOffset;
         private float _scale = 1f;
         private bool _stateDirty;
@@ -313,18 +321,46 @@ namespace BIG.Unity.Overlay
             _stateDirty = true;
         }
 
+        /// <summary>
+        /// Cancels the current (or just-armed) content drag and restores the position from the press moment.
+        /// Call it when the game claims the gesture for itself — e.g. a chess piece got picked up on drag start.
+        /// </summary>
+        public void CancelDrag()
+        {
+            if (!_dragArmed && !_dragging)
+                return;
+
+            if (_dragging && _content != null)
+                _content.anchoredPosition = _dragStartContentPosition;
+
+            _dragArmed = false;
+            _dragging = false;
+        }
+
         private void UpdateDrag(bool cursorValid, Vector2 screenPoint)
         {
             bool pressed = IsMousePressed();
 
-            if (_dragging)
+            if (_dragArmed || _dragging)
             {
                 if (!pressed)
                 {
+                    if (_dragging)
+                        SaveContentState();
+                    _dragArmed = false;
                     _dragging = false;
-                    SaveContentState();
                 }
-                else if (cursorValid && _content != null && _content.parent is RectTransform parent
+                else if (_dragArmed && cursorValid
+                         && (screenPoint - _pressScreenPoint).sqrMagnitude >= DRAG_THRESHOLD * DRAG_THRESHOLD
+                         && _content != null && _content.parent is RectTransform armedParent
+                         && RectTransformUtility.ScreenPointToLocalPointInRectangle(armedParent, screenPoint, _uiCamera, out Vector2 armedLocal))
+                {
+                    // Threshold crossed — rebase the offset here, so the content starts moving without a jump.
+                    _dragOffset = armedLocal - _content.anchoredPosition;
+                    _dragArmed = false;
+                    _dragging = true;
+                }
+                else if (_dragging && cursorValid && _content != null && _content.parent is RectTransform parent
                          && RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenPoint, _uiCamera, out Vector2 local))
                 {
                     _content.anchoredPosition = local - _dragOffset;
@@ -333,12 +369,11 @@ namespace BIG.Unity.Overlay
             }
             else if (pressed && !_mouseWasPressed && cursorValid
                      && _content != null && IsOverRect(_moveHandle, screenPoint)
-                     && !IsOverInteractiveUi(screenPoint)
-                     && _content.parent is RectTransform parent
-                     && RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenPoint, _uiCamera, out Vector2 local))
+                     && !IsOverSelectable(screenPoint))
             {
-                _dragOffset = local - _content.anchoredPosition;
-                _dragging = true;
+                _pressScreenPoint = screenPoint;
+                _dragStartContentPosition = _content.anchoredPosition;
+                _dragArmed = true;
             }
 
             _mouseWasPressed = pressed;
@@ -617,11 +652,11 @@ namespace BIG.Unity.Overlay
         private static readonly List<RaycastResult> RAYCAST_RESULTS = new List<RaycastResult>(16);
 
         /// <summary>
-        /// True when the press landed on an interactive uGUI element (button, slider, draggable piece...) —
-        /// anything with pointer-down/click/drag handlers on itself or a parent. Such elements win over
-        /// the content drag, so the Move Handle can safely cover the whole content.
+        /// True when the press landed on a Selectable widget (button, slider, toggle, dropdown...) —
+        /// those always win over the content drag. Checked on the TOP raycast hit only (the element
+        /// that actually receives the uGUI events).
         /// </summary>
-        private static bool IsOverInteractiveUi(Vector2 screenPoint)
+        private bool IsOverSelectable(Vector2 screenPoint)
         {
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem == null)
@@ -631,21 +666,11 @@ namespace BIG.Unity.Overlay
             RAYCAST_RESULTS.Clear();
             eventSystem.RaycastAll(pointer, RAYCAST_RESULTS);
 
-            foreach (RaycastResult result in RAYCAST_RESULTS)
-            {
-                GameObject target = result.gameObject;
-                if (ExecuteEvents.GetEventHandler<IPointerDownHandler>(target) != null
-                    || ExecuteEvents.GetEventHandler<IPointerClickHandler>(target) != null
-                    || ExecuteEvents.GetEventHandler<IBeginDragHandler>(target) != null
-                    || ExecuteEvents.GetEventHandler<IDragHandler>(target) != null)
-                {
-                    RAYCAST_RESULTS.Clear();
-                    return true;
-                }
-            }
+            bool over = RAYCAST_RESULTS.Count > 0
+                        && RAYCAST_RESULTS[0].gameObject.GetComponentInParent<Selectable>() != null;
 
             RAYCAST_RESULTS.Clear();
-            return false;
+            return over;
         }
 
         #endregion

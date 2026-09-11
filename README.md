@@ -63,8 +63,11 @@ public class MyOverlayView : BaseBehaviour
 
 ### 3. Drag and scale
 * Grab the **Move Handle** → the content follows the cursor anywhere on the desktop, across monitors.
-  The handle can safely be the WHOLE content: a press on an interactive element (button, slider,
-  anything with pointer/drag handlers — e.g. a chess piece) never starts the drag.
+  The handle can safely be the WHOLE content:
+  * presses on Selectables (buttons, sliders, toggles...) never start the drag,
+  * the content moves only after the cursor travels a few pixels, so plain clicks never nudge it,
+  * when your game claims a gesture for itself (e.g. a chess piece got picked up on uGUI drag start),
+    call `OverlayWindow.Instance.CancelDrag()` — the window drag is cancelled and the position restored.
 * Scroll over the hit area → the content scales within **Min/Max Scale** (**Scroll Scale Step** per notch;
   set it to 0 when your game uses the wheel itself and call `SetContentScale` on your own).
 * Position and scale save automatically (on release / when the cursor leaves the overlay).
