@@ -31,43 +31,37 @@ namespace BIG.Unity.Overlay
     {
         public string Name => "Overlay";
 
-        public static readonly UserDataKey Saved = new UserDataKey("WINDOW_SAVED");
-        public static readonly UserDataKey PositionX = new UserDataKey("WINDOW_POS_X");
-        public static readonly UserDataKey PositionY = new UserDataKey("WINDOW_POS_Y");
-        public static readonly UserDataKey SizeX = new UserDataKey("WINDOW_SIZE_X");
-        public static readonly UserDataKey SizeY = new UserDataKey("WINDOW_SIZE_Y");
+        public static readonly UserDataKey Saved = new UserDataKey("OVERLAY_SAVED");
+        public static readonly UserDataKey PositionX = new UserDataKey("OVERLAY_POS_X");
+        public static readonly UserDataKey PositionY = new UserDataKey("OVERLAY_POS_Y");
+        public static readonly UserDataKey Scale = new UserDataKey("OVERLAY_SCALE");
     }
 
     /// <summary>
-    /// The one overlay component. The window behaves like a normal draggable/resizable Windows window,
-    /// just transparent and click-through outside your UI:
+    /// The one overlay component.
     ///
-    /// STARTUP — on first launch the window aligns flush to Start Corner of the primary monitor's work area
-    /// (above the taskbar). No corner state is kept — corners are one-shot moves (<see cref="SnapToCorner(OverlayCorner)"/>).
-    /// After the player drags or resizes the window, its position and size persist through <see cref="IUserData"/>
-    /// and are restored on the next launch (with a fallback to Start Corner when that spot is no longer on any monitor).
+    /// WINDOW — the OS window is an invisible layer automatically stretched over the ENTIRE virtual desktop
+    /// (all monitors, kept in sync when the monitor layout changes). It never moves and never resizes,
+    /// so there is no window flicker — what the player drags and scales is the CONTENT rect (your game panel),
+    /// with pure uGUI: smoothly, across monitors, like moving a sticker over the desktop.
     /// The window starts parked off-screen (see OverlayBootstrap) and shows up only here, already transparent.
     ///
-    /// HANDLES — assign a Move Handle rect (e.g. a title label) to drag the whole OS window with the cursor,
-    /// across monitors like any Windows window, and a Resize Handle rect (bottom-right grip) to resize it
-    /// within the Min/Max constraints (top-left corner stays in place). Handles are detected geometrically —
-    /// no extra components, and they count as hit area automatically.
+    /// CONTENT — on first launch the content aligns flush to Start Corner of the primary monitor's work area
+    /// (above the taskbar). Corners are one-shot moves (<see cref="SnapContentToCorner(OverlayCorner)"/>) — no corner
+    /// state is kept. After the player drags or scales the content, its position and scale persist through
+    /// <see cref="IUserData"/> and are restored on the next launch (with a fallback to Start Corner when that spot
+    /// is no longer on any monitor). Grab the Move Handle to drag; scroll over the hit area to scale
+    /// within Min/Max Scale (uses <see cref="GlobalMouseScroll"/>, so it works without window focus).
+    /// The content rect should use single-point anchors (anchorMin == anchorMax).
     ///
     /// HIT AREA — click-through controlled by GEOMETRY instead of UniWinC's per-pixel opacity test
     /// (with per-pixel testing a fully hidden overlay becomes a permanent "hole" that can never detect hover).
-    /// Cursor over any active hit rect (or handle) → window clickable, outside → clicks fall through to the desktop.
-    /// Hover is exposed three ways: <see cref="IsCursorOver"/>, the <see cref="OverlayHoverChanged"/> BIG event
-    /// and the OnCursorEnter/OnCursorExit UnityEvents below.
+    /// Cursor over any active hit rect (or the Move Handle) → window clickable, outside → clicks fall through
+    /// to the desktop. Hover is exposed three ways: <see cref="IsCursorOver"/>, the <see cref="OverlayHoverChanged"/>
+    /// BIG event and the OnCursorEnter/OnCursorExit UnityEvents below.
     /// </summary>
     public sealed class OverlayWindow : BaseBehaviour
     {
-        private enum DragState
-        {
-            None,
-            Move,
-            Resize,
-        }
-
         public static OverlayWindow Instance { get; private set; }
 
         [Inject] private IUserData _userData;
@@ -80,48 +74,48 @@ namespace BIG.Unity.Overlay
         [SerializeField] private UniWindowController _uniWindowController;
 
 #if ODIN_INSPECTOR
-        [FoldoutGroup("Window")]
+        [FoldoutGroup("Content")]
+#else
+        [Header("Content")]
 #endif
-        [SerializeField, Tooltip("Corner the window aligns to on first launch (before the player moves it). One-shot — no corner state is kept afterwards.")]
+        [SerializeField, Tooltip("The draggable game panel. Use single-point anchors (anchorMin == anchorMax); any pivot works.")]
+        private RectTransform _content;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Content")]
+#endif
+        [SerializeField, Tooltip("Corner of the primary monitor's work area the content aligns to on first launch. One-shot — no corner state is kept afterwards.")]
         private OverlayCorner _startCorner = OverlayCorner.BottomRight;
 
 #if ODIN_INSPECTOR
-        [FoldoutGroup("Window")]
+        [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Window size on first launch, in pixels.")]
-        private Vector2 _windowSize = new Vector2(1100f, 900f);
-
-#if ODIN_INSPECTOR
-        [FoldoutGroup("Window")]
-#endif
-        [SerializeField, Tooltip("Resize constraints for the Resize Handle (and for restored sizes).")]
-        private Vector2 _minWindowSize = new Vector2(400f, 300f);
-
-#if ODIN_INSPECTOR
-        [FoldoutGroup("Window")]
-#endif
-        [SerializeField] private Vector2 _maxWindowSize = new Vector2(2560f, 1440f);
-
-#if ODIN_INSPECTOR
-        [FoldoutGroup("Handles")]
-#else
-        [Header("Handles")]
-#endif
-        [SerializeField, Tooltip("Grab this rect (e.g. the title label) to drag the whole OS window, across monitors like any Windows window. Counts as hit area automatically.")]
+        [SerializeField, Tooltip("Grab this rect (e.g. the title label) to drag the content around the desktop. Counts as hit area automatically.")]
         private RectTransform _moveHandle;
 
 #if ODIN_INSPECTOR
-        [FoldoutGroup("Handles")]
+        [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Bottom-right corner grip: drag to resize the window within Min/Max Window Size (top-left corner stays in place). Counts as hit area automatically.")]
-        private RectTransform _resizeHandle;
+        [SerializeField, Tooltip("Scroll over the hit area scales the content. 0 disables scroll scaling (e.g. when the game uses the wheel itself).")]
+        private float _scrollScaleStep = 0.1f;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Content")]
+#endif
+        [SerializeField, Tooltip("Content scale constraints for scroll scaling (and for the restored scale).")]
+        private float _minScale = 0.5f;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Content")]
+#endif
+        [SerializeField] private float _maxScale = 2f;
 
 #if ODIN_INSPECTOR
         [FoldoutGroup("Hit Area")]
 #else
         [Header("Hit Area")]
 #endif
-        [SerializeField, Tooltip("Cursor over ANY of these rects (or a handle) = window clickable, outside = click-through. Inactive objects are skipped. Empty list + no handles = click-through stays in UniWinC mode.")]
+        [SerializeField, Tooltip("Cursor over ANY of these rects (or the Move Handle) = window clickable, outside = click-through. Inactive objects are skipped. Empty list + no handle = click-through stays in UniWinC mode.")]
         private List<RectTransform> _hitRects = new List<RectTransform>();
 
 #if ODIN_INSPECTOR
@@ -147,14 +141,17 @@ namespace BIG.Unity.Overlay
         private bool _lastClickThrough = true;
         private bool _cursorOver;
 
-        private DragState _drag;
+        private bool _dragging;
         private bool _mouseWasPressed;
-        private Vector2 _dragStartCursor;
-        private Vector2 _dragStartPosition;
-        private Vector2 _dragStartSize;
+        private Vector2 _dragOffset;
+        private float _scale = 1f;
+        private bool _stateDirty;
 
         /// <summary> Whether the global cursor (regardless of click-through) is over the hit area. </summary>
         public bool IsCursorOver => _cursorOver;
+
+        /// <summary> Current content scale. </summary>
+        public float ContentScale => _scale;
 
         protected override void Awake()
         {
@@ -180,7 +177,7 @@ namespace BIG.Unity.Overlay
 
             if (_uniWindowController == null)
             {
-                // Without the controller we cannot place the window through UniWinC,
+                // Without the controller we cannot manage the window through UniWinC,
                 // but it must not stay parked off-screen forever.
                 this.Log("No UniWindowController in the scene — restoring the window with raw Win32.", LogLevel.Error);
                 NativeWindow.EmergencyShow();
@@ -195,19 +192,22 @@ namespace BIG.Unity.Overlay
             yield return null;
             yield return null;
 
-            PositionWindow();
+            CoverVirtualDesktop();
+            PositionContent();
 
             // Window style changes (borderless/layered) can move the window once more a moment later.
             yield return new WaitForSecondsRealtime(0.5f);
-            PositionWindow();
+            CoverVirtualDesktop();
 
-            _uniWindowController.OnMonitorChanged += EnsureVisible;
+            _uniWindowController.OnMonitorChanged += HandleMonitorChanged;
         }
 
         public override void OnDestroy()
         {
             if (_uniWindowController != null)
-                _uniWindowController.OnMonitorChanged -= EnsureVisible;
+                _uniWindowController.OnMonitorChanged -= HandleMonitorChanged;
+
+            SaveContentState();
 
             if (Instance == this)
                 Instance = null;
@@ -224,135 +224,212 @@ namespace BIG.Unity.Overlay
 
             UpdateHover(cursorValid, screenPoint);
             UpdateDrag(cursorValid, screenPoint);
+            UpdateScrollScale();
         }
 
         #region Window
 
-        /// <summary> One-shot move: aligns the window flush to the corner of the monitor it currently sits on. </summary>
-        public void SnapToCorner(OverlayCorner corner) => SnapToCorner(corner, MonitorUnderWindow());
+        /// <summary>
+        /// Stretch the invisible window over the bounding box of ALL monitors. The window never moves
+        /// afterwards — the content does — so there is nothing to flicker.
+        /// </summary>
+        private void CoverVirtualDesktop()
+        {
+            int count = UniWindowController.GetMonitorCount();
+            if (count == 0)
+                return;
+
+            Rect union = UniWindowController.GetMonitorRect(0);
+            for (int i = 1; i < count; i++)
+            {
+                Rect monitor = UniWindowController.GetMonitorRect(i);
+                union = Rect.MinMaxRect(
+                    Mathf.Min(union.xMin, monitor.xMin),
+                    Mathf.Min(union.yMin, monitor.yMin),
+                    Mathf.Max(union.xMax, monitor.xMax),
+                    Mathf.Max(union.yMax, monitor.yMax));
+            }
+
+            _uniWindowController.windowSize = union.size;
+            _uniWindowController.windowPosition = union.position;
+        }
+
+        private void HandleMonitorChanged()
+        {
+            CoverVirtualDesktop();
+
+            if (_content == null || !TryGetContentScreenRect(out Rect contentRect))
+                return;
+
+            // When the monitor with the content got detached, pull the content back to Start Corner.
+            if (!IsVisibleOnAnyMonitor(ScreenToUniWin(contentRect)))
+                SnapContentToCorner(_startCorner, 0);
+        }
+
+        #endregion
+
+        #region Content
+
+        /// <summary> One-shot move: aligns the content flush to the corner of the primary monitor's work area. </summary>
+        public void SnapContentToCorner(OverlayCorner corner) => SnapContentToCorner(corner, 0);
 
         /// <summary> Int overload for wiring directly into UnityEvents (0=BottomRight, 1=BottomLeft, 2=TopRight, 3=TopLeft). </summary>
-        public void SnapToCorner(int cornerIndex) => SnapToCorner((OverlayCorner)Mathf.Clamp(cornerIndex, 0, 3));
+        public void SnapContentToCorner(int cornerIndex) => SnapContentToCorner((OverlayCorner)Mathf.Clamp(cornerIndex, 0, 3), 0);
 
-        /// <summary> One-shot move: aligns the window flush to the corner of the given monitor's work area (above the taskbar). </summary>
-        public void SnapToCorner(OverlayCorner corner, int monitorIndex)
+        /// <summary> One-shot move: aligns the content flush to the corner of the given monitor's work area (above the taskbar). </summary>
+        public void SnapContentToCorner(OverlayCorner corner, int monitorIndex)
         {
-            if (Application.isEditor || _uniWindowController == null)
+            if (Application.isEditor || _uniWindowController == null || _content == null)
+                return;
+
+            if (_content.parent is not RectTransform parent)
                 return;
 
             Rect workArea = ResolveWorkArea(monitorIndex);
+            bool left = corner is OverlayCorner.BottomLeft or OverlayCorner.TopLeft;
+            bool bottom = corner is OverlayCorner.BottomRight or OverlayCorner.BottomLeft;
 
-            // workArea is in UniWinC space (origin bottom-left of the primary monitor, Y up);
-            // windowPosition is the bottom-left corner of the window.
-            Vector2 size = _uniWindowController.windowSize;
-
-            float x = corner is OverlayCorner.BottomLeft or OverlayCorner.TopLeft
-                ? workArea.xMin
-                : workArea.xMax - size.x;
-
-            float y = corner is OverlayCorner.BottomRight or OverlayCorner.BottomLeft
-                ? workArea.yMin
-                : workArea.yMax - size.y;
-
-            _uniWindowController.windowPosition = new Vector2(x, y);
-        }
-
-        /// <summary> Clamp a window size to the configured min/max constraints. </summary>
-        public Vector2 ClampSize(Vector2 size) => new Vector2(
-            Mathf.Clamp(size.x, _minWindowSize.x, _maxWindowSize.x),
-            Mathf.Clamp(size.y, _minWindowSize.y, _maxWindowSize.y));
-
-        /// <summary> Persists the current window position and size — restored on the next launch. Called automatically after a drag/resize. </summary>
-        public void SaveWindowState()
-        {
-            if (Application.isEditor || _uniWindowController == null)
+            // Work area corner: UniWinC coords -> window client -> screen pixels -> parent local.
+            var uniwinCorner = new Vector2(left ? workArea.xMin : workArea.xMax, bottom ? workArea.yMin : workArea.yMax);
+            Vector2 screenCorner = UniWinToScreen(uniwinCorner);
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenCorner, _uiCamera, out Vector2 targetLocal))
                 return;
 
-            Vector2 position = _uniWindowController.windowPosition;
-            Vector2 size = _uniWindowController.windowSize;
+            // Matching corner of the scaled content rect, relative to its pivot.
+            Rect rect = _content.rect;
+            var rectCorner = new Vector2(left ? rect.xMin : rect.xMax, bottom ? rect.yMin : rect.yMax) * _scale;
+
+            _content.anchoredPosition = targetLocal - AnchorReference(parent, _content) - rectCorner;
+            _stateDirty = true;
+        }
+
+        /// <summary> Set content scale (clamped to Min/Max Scale). </summary>
+        public void SetContentScale(float scale)
+        {
+            _scale = Mathf.Clamp(scale, _minScale, _maxScale);
+            if (_content != null)
+                _content.localScale = new Vector3(_scale, _scale, 1f);
+            _stateDirty = true;
+        }
+
+        private void UpdateDrag(bool cursorValid, Vector2 screenPoint)
+        {
+            bool pressed = IsMousePressed();
+
+            if (_dragging)
+            {
+                if (!pressed)
+                {
+                    _dragging = false;
+                    SaveContentState();
+                }
+                else if (cursorValid && _content != null && _content.parent is RectTransform parent
+                         && RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenPoint, _uiCamera, out Vector2 local))
+                {
+                    _content.anchoredPosition = local - _dragOffset;
+                    _stateDirty = true;
+                }
+            }
+            else if (pressed && !_mouseWasPressed && cursorValid
+                     && _content != null && IsOverRect(_moveHandle, screenPoint)
+                     && _content.parent is RectTransform parent
+                     && RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenPoint, _uiCamera, out Vector2 local))
+            {
+                _dragOffset = local - _content.anchoredPosition;
+                _dragging = true;
+            }
+
+            _mouseWasPressed = pressed;
+        }
+
+        private void UpdateScrollScale()
+        {
+            // Drain the global counter every frame; apply only when the cursor is over the overlay.
+            float notches = GlobalMouseScroll.ConsumeNotches();
+            if (_scrollScaleStep <= 0f || !_cursorOver || _content == null || notches == 0f)
+                return;
+
+            SetContentScale(_scale * (1f + notches * _scrollScaleStep));
+        }
+
+        private void PositionContent()
+        {
+            if (_content == null)
+                return;
+
+            SetContentScale(_userData.GetFloat(OverlayUserDataKeysProvider.Scale, 1f));
+
+            if (_userData.GetBool(OverlayUserDataKeysProvider.Saved))
+            {
+                var position = new Vector2(
+                    _userData.GetFloat(OverlayUserDataKeysProvider.PositionX),
+                    _userData.GetFloat(OverlayUserDataKeysProvider.PositionY));
+                _content.anchoredPosition = position;
+
+                // Monitor layout could have changed since the save — the content must stay reachable.
+                if (TryGetContentScreenRect(out Rect contentRect) && IsVisibleOnAnyMonitor(ScreenToUniWin(contentRect)))
+                {
+                    _stateDirty = false;
+                    return;
+                }
+            }
+
+            SnapContentToCorner(_startCorner, 0);
+        }
+
+        /// <summary> Persists content position and scale — restored on the next launch. Called automatically after drag/scale. </summary>
+        public void SaveContentState()
+        {
+            if (Application.isEditor || _content == null || !_stateDirty)
+                return;
+
+            _stateDirty = false;
+            Vector2 position = _content.anchoredPosition;
             _userData.Set(OverlayUserDataKeysProvider.Saved, true);
             _userData.Set(OverlayUserDataKeysProvider.PositionX, position.x);
             _userData.Set(OverlayUserDataKeysProvider.PositionY, position.y);
-            _userData.Set(OverlayUserDataKeysProvider.SizeX, size.x);
-            _userData.Set(OverlayUserDataKeysProvider.SizeY, size.y);
+            _userData.Set(OverlayUserDataKeysProvider.Scale, _scale);
         }
 
-        /// <summary> Saved state when there is one and it is still on a monitor, Start Corner otherwise. </summary>
-        private void PositionWindow()
+        private static Vector2 AnchorReference(RectTransform parent, RectTransform child)
         {
-            if (TryRestoreWindowState())
-                return;
-
-            _uniWindowController.windowSize = ClampSize(_windowSize);
-            SnapToCorner(_startCorner, 0);
+            Rect parentRect = parent.rect;
+            return new Vector2(
+                Mathf.Lerp(parentRect.xMin, parentRect.xMax, child.anchorMin.x),
+                Mathf.Lerp(parentRect.yMin, parentRect.yMax, child.anchorMin.y));
         }
 
-        private bool TryRestoreWindowState()
+        private bool TryGetContentScreenRect(out Rect screenRect)
         {
-            if (!_userData.GetBool(OverlayUserDataKeysProvider.Saved))
+            screenRect = default;
+            if (_content == null)
                 return false;
 
-            var position = new Vector2(
-                _userData.GetFloat(OverlayUserDataKeysProvider.PositionX),
-                _userData.GetFloat(OverlayUserDataKeysProvider.PositionY));
-            var size = ClampSize(new Vector2(
-                _userData.GetFloat(OverlayUserDataKeysProvider.SizeX, _windowSize.x),
-                _userData.GetFloat(OverlayUserDataKeysProvider.SizeY, _windowSize.y)));
-
-            // Monitor layout could have changed since the save — the window must stay reachable.
-            if (!IsVisibleOnAnyMonitor(new Rect(position, size)))
-                return false;
-
-            _uniWindowController.windowSize = size;
-            _uniWindowController.windowPosition = position;
+            var corners = new Vector3[4];
+            _content.GetWorldCorners(corners);
+            Vector2 min = RectTransformUtility.WorldToScreenPoint(_uiCamera, corners[0]);
+            Vector2 max = RectTransformUtility.WorldToScreenPoint(_uiCamera, corners[2]);
+            screenRect = Rect.MinMaxRect(min.x, min.y, max.x, max.y);
             return true;
         }
 
-        /// <summary> Monitor layout changed — when the window fell off every screen, pull it back to Start Corner. </summary>
-        private void EnsureVisible()
-        {
-            var windowRect = new Rect(_uniWindowController.windowPosition, _uniWindowController.windowSize);
-            if (!IsVisibleOnAnyMonitor(windowRect))
-                SnapToCorner(_startCorner, 0);
-        }
+        #endregion
 
-        private static bool IsVisibleOnAnyMonitor(Rect windowRect)
+        #region Monitors
+
+        private static bool IsVisibleOnAnyMonitor(Rect uniwinRect)
         {
             int count = UniWindowController.GetMonitorCount();
             for (int i = 0; i < count; i++)
             {
                 Rect monitor = UniWindowController.GetMonitorRect(i);
-                float overlapX = Mathf.Min(windowRect.xMax, monitor.xMax) - Mathf.Max(windowRect.xMin, monitor.xMin);
-                float overlapY = Mathf.Min(windowRect.yMax, monitor.yMax) - Mathf.Max(windowRect.yMin, monitor.yMin);
+                float overlapX = Mathf.Min(uniwinRect.xMax, monitor.xMax) - Mathf.Max(uniwinRect.xMin, monitor.xMin);
+                float overlapY = Mathf.Min(uniwinRect.yMax, monitor.yMax) - Mathf.Max(uniwinRect.yMin, monitor.yMin);
                 if (overlapX >= 50f && overlapY >= 50f)
                     return true;
             }
 
             return false;
-        }
-
-        private int MonitorUnderWindow()
-        {
-            Vector2 center = _uniWindowController.windowPosition + _uniWindowController.windowSize * 0.5f;
-
-            int count = UniWindowController.GetMonitorCount();
-            int best = 0;
-            float bestDistance = float.MaxValue;
-            for (int i = 0; i < count; i++)
-            {
-                Rect rect = UniWindowController.GetMonitorRect(i);
-                if (rect.Contains(center))
-                    return i;
-
-                float distance = (rect.center - center).sqrMagnitude;
-                if (distance < bestDistance)
-                {
-                    bestDistance = distance;
-                    best = i;
-                }
-            }
-
-            return best;
         }
 
         /// <summary>
@@ -380,71 +457,32 @@ namespace BIG.Unity.Overlay
 
         #endregion
 
-        #region Drag and resize
+        #region Coordinates
 
-        private void UpdateDrag(bool cursorValid, Vector2 screenPoint)
+        /// <summary>
+        /// UniWinC coordinates (origin bottom-left of the primary monitor, Y up) -> Screen pixels of our window.
+        /// The window covers the virtual desktop, so this is a plain offset plus the client-to-Screen DPI rescale.
+        /// </summary>
+        private Vector2 UniWinToScreen(Vector2 uniwinPoint)
         {
-            bool pressed = IsMousePressed();
+            Vector2 inWindow = uniwinPoint - _uniWindowController.windowPosition;
+            Vector2 client = _uniWindowController.clientSize;
+            if (client.x <= 0f || client.y <= 0f)
+                return inWindow;
 
-            if (_drag != DragState.None)
-            {
-                if (!pressed)
-                {
-                    _drag = DragState.None;
-                    SaveWindowState();
-                }
-                else
-                {
-                    ApplyDrag();
-                }
-            }
-            else if (pressed && !_mouseWasPressed && cursorValid)
-            {
-                // Press started this frame over a handle — resize wins when they overlap.
-                if (IsOverRect(_resizeHandle, screenPoint))
-                    BeginDrag(DragState.Resize);
-                else if (IsOverRect(_moveHandle, screenPoint))
-                    BeginDrag(DragState.Move);
-            }
-
-            _mouseWasPressed = pressed;
+            return new Vector2(inWindow.x * Screen.width / client.x, inWindow.y * Screen.height / client.y);
         }
 
-        private void BeginDrag(DragState state)
+        private Rect ScreenToUniWin(Rect screenRect)
         {
-            _drag = state;
-            _dragStartCursor = _uniWindowController.cursorPosition;
-            _dragStartPosition = _uniWindowController.windowPosition;
-            _dragStartSize = _uniWindowController.windowSize;
-        }
+            Vector2 client = _uniWindowController.clientSize;
+            if (client.x <= 0f || client.y <= 0f)
+                return screenRect;
 
-        private void ApplyDrag()
-        {
-            // The window follows the GLOBAL cursor — robust also when the cursor briefly leaves the window.
-            Vector2 delta = _uniWindowController.cursorPosition - _dragStartCursor;
-
-            if (_drag == DragState.Move)
-            {
-                _uniWindowController.windowPosition = _dragStartPosition + delta;
-                return;
-            }
-
-            // Resize as a bottom-right grip: right = wider, down = taller. UniWinC coordinates have Y up
-            // and windowPosition at the bottom-left, so the height change also shifts the position to keep
-            // the TOP-left corner of the window in place.
-            Vector2 size = ClampSize(new Vector2(_dragStartSize.x + delta.x, _dragStartSize.y - delta.y));
-            _uniWindowController.windowSize = size;
-            _uniWindowController.windowPosition = new Vector2(_dragStartPosition.x, _dragStartPosition.y + (_dragStartSize.y - size.y));
-        }
-
-        private static bool IsMousePressed()
-        {
-#if ENABLE_INPUT_SYSTEM
-            var mouse = UnityEngine.InputSystem.Mouse.current;
-            return mouse != null && mouse.leftButton.isPressed;
-#else
-            return Input.GetMouseButton(0);
-#endif
+            Vector2 windowPosition = _uniWindowController.windowPosition;
+            var min = new Vector2(screenRect.xMin * client.x / Screen.width, screenRect.yMin * client.y / Screen.height) + windowPosition;
+            var max = new Vector2(screenRect.xMax * client.x / Screen.width, screenRect.yMax * client.y / Screen.height) + windowPosition;
+            return Rect.MinMaxRect(min.x, min.y, max.x, max.y);
         }
 
         #endregion
@@ -453,7 +491,7 @@ namespace BIG.Unity.Overlay
 
         private void InitializeHitArea()
         {
-            RectTransform first = _moveHandle != null ? _moveHandle : _resizeHandle;
+            RectTransform first = _moveHandle != null ? _moveHandle : null;
             if (first == null)
             {
                 foreach (RectTransform rect in _hitRects)
@@ -488,9 +526,14 @@ namespace BIG.Unity.Overlay
                 Events.Raise(new OverlayHoverChanged(over));
 
                 if (over)
+                {
                     _onCursorEnter?.Invoke();
+                }
                 else
+                {
                     _onCursorExit?.Invoke();
+                    SaveContentState(); // natural moment to flush the state without spamming disk writes
+                }
             }
 
             bool clickThrough = !over;
@@ -503,8 +546,8 @@ namespace BIG.Unity.Overlay
 
         /// <summary>
         /// The same conversion UniWinC does internally (GetClientCursorPosition): cursor and window
-        /// are in UniWinC space (origin bottom-left of the monitor, Y up), cursor relative to the window
-        /// rescaled to Screen pixels (matters with DPI != 100%). Borderless window → client area offset = 0.
+        /// are in UniWinC space, cursor relative to the window rescaled to Screen pixels (matters with DPI != 100%).
+        /// Borderless window → client area offset = 0.
         /// </summary>
         private bool TryGetCursorScreenPoint(out Vector2 screenPoint)
         {
@@ -526,9 +569,9 @@ namespace BIG.Unity.Overlay
 
         private bool IsCursorOverAnything(Vector2 screenPoint)
         {
-            // Handles count as hit area automatically — otherwise the window would be
-            // click-through over them and they could never be grabbed.
-            if (IsOverRect(_moveHandle, screenPoint) || IsOverRect(_resizeHandle, screenPoint))
+            // The Move Handle counts as hit area automatically — otherwise the window would be
+            // click-through over it and it could never be grabbed.
+            if (IsOverRect(_moveHandle, screenPoint))
                 return true;
 
             foreach (RectTransform rect in _hitRects)
@@ -553,6 +596,16 @@ namespace BIG.Unity.Overlay
             Rect r = rect.rect;
             return local.x >= r.xMin - _hitPadding && local.x <= r.xMax + _hitPadding
                 && local.y >= r.yMin - _hitPadding && local.y <= r.yMax + _hitPadding;
+        }
+
+        private static bool IsMousePressed()
+        {
+#if ENABLE_INPUT_SYSTEM
+            var mouse = UnityEngine.InputSystem.Mouse.current;
+            return mouse != null && mouse.leftButton.isPressed;
+#else
+            return Input.GetMouseButton(0);
+#endif
         }
 
         #endregion
