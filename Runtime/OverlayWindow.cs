@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using Kirurobo;
 using UnityEngine;
 using UnityEngine.Events;
+using UnityEngine.EventSystems;
 #if ODIN_INSPECTOR
 using Sirenix.OdinInspector;
 #endif
@@ -90,7 +91,7 @@ namespace BIG.Unity.Overlay
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Grab this rect (e.g. the title label) to drag the content around the desktop. Counts as hit area automatically.")]
+        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: a press on an interactive element (button, slider, anything with pointer/drag handlers, e.g. a chess piece) never starts the drag. Counts as hit area automatically.")]
         private RectTransform _moveHandle;
 
 #if ODIN_INSPECTOR
@@ -332,6 +333,7 @@ namespace BIG.Unity.Overlay
             }
             else if (pressed && !_mouseWasPressed && cursorValid
                      && _content != null && IsOverRect(_moveHandle, screenPoint)
+                     && !IsOverInteractiveUi(screenPoint)
                      && _content.parent is RectTransform parent
                      && RectTransformUtility.ScreenPointToLocalPointInRectangle(parent, screenPoint, _uiCamera, out Vector2 local))
             {
@@ -610,6 +612,40 @@ namespace BIG.Unity.Overlay
 #else
             return Input.GetMouseButton(0);
 #endif
+        }
+
+        private static readonly List<RaycastResult> RAYCAST_RESULTS = new List<RaycastResult>(16);
+
+        /// <summary>
+        /// True when the press landed on an interactive uGUI element (button, slider, draggable piece...) —
+        /// anything with pointer-down/click/drag handlers on itself or a parent. Such elements win over
+        /// the content drag, so the Move Handle can safely cover the whole content.
+        /// </summary>
+        private static bool IsOverInteractiveUi(Vector2 screenPoint)
+        {
+            EventSystem eventSystem = EventSystem.current;
+            if (eventSystem == null)
+                return false;
+
+            var pointer = new PointerEventData(eventSystem) { position = screenPoint };
+            RAYCAST_RESULTS.Clear();
+            eventSystem.RaycastAll(pointer, RAYCAST_RESULTS);
+
+            foreach (RaycastResult result in RAYCAST_RESULTS)
+            {
+                GameObject target = result.gameObject;
+                if (ExecuteEvents.GetEventHandler<IPointerDownHandler>(target) != null
+                    || ExecuteEvents.GetEventHandler<IPointerClickHandler>(target) != null
+                    || ExecuteEvents.GetEventHandler<IBeginDragHandler>(target) != null
+                    || ExecuteEvents.GetEventHandler<IDragHandler>(target) != null)
+                {
+                    RAYCAST_RESULTS.Clear();
+                    return true;
+                }
+            }
+
+            RAYCAST_RESULTS.Clear();
+            return false;
         }
 
         #endregion
