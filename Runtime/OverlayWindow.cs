@@ -344,9 +344,13 @@ namespace BIG.Unity.Overlay
 
         private void UpdateScrollScale()
         {
-            // Drain the global counter every frame; apply only when the cursor is over the overlay.
+            // Step 0 = the game owns the wheel — do NOT touch the shared GlobalMouseScroll counter at all.
+            if (_scrollScaleStep <= 0f || _content == null)
+                return;
+
+            // Drain the counter every frame; apply only when the cursor is over the overlay.
             float notches = GlobalMouseScroll.ConsumeNotches();
-            if (_scrollScaleStep <= 0f || !_cursorOver || _content == null || notches == 0f)
+            if (!_cursorOver || notches == 0f)
                 return;
 
             SetContentScale(_scale * (1f + notches * _scrollScaleStep));
