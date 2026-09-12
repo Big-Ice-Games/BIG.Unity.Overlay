@@ -193,6 +193,10 @@ namespace BIG.Unity.Overlay
                 yield break;
             }
 
+            // The overlay MUST keep polling the cursor while unfocused — with a paused player the
+            // click-through state freezes and the invisible desktop-covering window blocks all input.
+            Application.runInBackground = true;
+
             _uniWindowController.shouldFitMonitor = false;
             InitializeHitArea();
 
@@ -577,12 +581,10 @@ namespace BIG.Unity.Overlay
                 }
             }
 
-            bool clickThrough = !over;
-            if (clickThrough != _lastClickThrough)
-            {
-                _uniWindowController.isClickThrough = clickThrough;
-                _lastClickThrough = clickThrough;
-            }
+            // Re-asserted EVERY frame, not only on change — focus/style/monitor changes can reset the
+            // native flag behind our back, and a stale "clickable" on a desktop-covering window
+            // blocks input on the whole desktop until the next hover toggle.
+            _uniWindowController.isClickThrough = !over;
         }
 
         /// <summary>
