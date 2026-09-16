@@ -48,9 +48,11 @@ namespace BIG.Unity.Overlay
     /// with pure uGUI: smoothly, across monitors, like moving a sticker over the desktop.
     /// The window starts parked off-screen (see OverlayBootstrap) and shows up only here, already transparent.
     ///
-    /// CONTENT — on first launch the content aligns flush to Start Corner of the primary monitor's work area
-    /// (above the taskbar). Corners are one-shot moves (<see cref="SnapContentToCorner(OverlayCorner)"/>) — no corner
-    /// state is kept. After the player drags or scales the content, its position and scale persist through
+    /// CONTENT — on first launch the content fills the primary monitor's work area (above the taskbar) —
+    /// the overlay's "fullscreen"; scroll shrinks it into a panel. With Start Fullscreen off it aligns flush
+    /// to Start Corner instead. Fullscreen and corners are one-shot moves (<see cref="FitContentToMonitor"/>,
+    /// <see cref="SnapContentToCorner(OverlayCorner)"/>) — no state is kept beyond position and scale.
+    /// After the player drags or scales the content, its position and scale persist through
     /// <see cref="IUserData"/> and are restored on the next launch (with a fallback to Start Corner when that spot
     /// is no longer on any monitor). Grab the Move Handle to drag; scroll over the hit area to scale
     /// within Min/Max Scale (uses <see cref="GlobalMouseScroll"/>, so it works without window focus).
@@ -86,7 +88,13 @@ namespace BIG.Unity.Overlay
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Corner of the primary monitor's work area the content aligns to on first launch. One-shot — no corner state is kept afterwards.")]
+        [SerializeField, Tooltip("On first launch the content fills the primary monitor's work area (scroll shrinks it from there). Off = the content parks in Start Corner instead.")]
+        private bool _startFullscreen = true;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Content")]
+#endif
+        [SerializeField, Tooltip("Corner of the primary monitor's work area the content aligns to on first launch when Start Fullscreen is off (and the fallback when the saved spot left every monitor). One-shot — no corner state is kept afterwards.")]
         private OverlayCorner _startCorner = OverlayCorner.BottomRight;
 
 #if ODIN_INSPECTOR
@@ -274,9 +282,9 @@ namespace BIG.Unity.Overlay
             if (_content == null || !TryGetContentScreenRect(out Rect contentRect))
                 return;
 
-            // When the monitor with the content got detached, pull the content back to Start Corner.
+            // When the monitor with the content got detached, pull the content back to the start placement.
             if (!IsVisibleOnAnyMonitor(ScreenToUniWin(contentRect)))
-                SnapContentToCorner(_startCorner, 0);
+                ApplyStartPlacement();
         }
 
         #endregion
@@ -316,13 +324,69 @@ namespace BIG.Unity.Overlay
             _stateDirty = true;
         }
 
-        /// <summary> Set content scale (clamped to Min/Max Scale). </summary>
+        /// <summary>
+        /// Set content scale (clamped to Min/Max Scale; the max stretches up to the fullscreen fit,
+        /// so scrolling can always bring the content back to filling the primary monitor).
+        /// </summary>
         public void SetContentScale(float scale)
         {
-            _scale = Mathf.Clamp(scale, _minScale, _maxScale);
+            float max = _maxScale;
+            if (TryGetFitScale(0, out float fit, out _, out _))
+                max = Mathf.Max(max, fit);
+
+            _scale = Mathf.Clamp(scale, _minScale, max);
             if (_content != null)
                 _content.localScale = new Vector3(_scale, _scale, 1f);
             _stateDirty = true;
+        }
+
+        /// <summary>
+        /// One-shot move: scales the content to fill the given monitor's work area (above the taskbar)
+        /// and centers it there — the overlay equivalent of fullscreen. Scroll shrinks it back into a panel.
+        /// </summary>
+        public void FitContentToMonitor(int monitorIndex = 0)
+        {
+            if (!TryGetFitScale(monitorIndex, out float fit, out Rect area, out RectTransform parent))
+                return;
+
+            _scale = Mathf.Max(fit, _minScale);
+            _content.localScale = new Vector3(_scale, _scale, 1f);
+            _content.anchoredPosition = area.center - AnchorReference(parent, _content) - _content.rect.center * _scale;
+            _stateDirty = true;
+        }
+
+        /// <summary>
+        /// Scale at which the content fills the monitor's work area (min of the two axis ratios),
+        /// plus that work area converted to the content parent's local space. False in the editor
+        /// or before UniWinC knows the window.
+        /// </summary>
+        private bool TryGetFitScale(int monitorIndex, out float fitScale, out Rect localWorkArea, out RectTransform parent)
+        {
+            fitScale = 0f;
+            localWorkArea = default;
+            parent = null;
+
+            if (Application.isEditor || _uniWindowController == null || _content == null)
+                return false;
+
+            if (_content.parent is not RectTransform p)
+                return false;
+
+            Rect workArea = ResolveWorkArea(monitorIndex);
+            if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(p, UniWinToScreen(workArea.min), _uiCamera, out Vector2 minLocal)
+                || !RectTransformUtility.ScreenPointToLocalPointInRectangle(p, UniWinToScreen(workArea.max), _uiCamera, out Vector2 maxLocal))
+            {
+                return false;
+            }
+
+            localWorkArea = Rect.MinMaxRect(minLocal.x, minLocal.y, maxLocal.x, maxLocal.y);
+            Rect rect = _content.rect;
+            if (rect.width <= 0f || rect.height <= 0f || localWorkArea.width <= 0f || localWorkArea.height <= 0f)
+                return false;
+
+            fitScale = Mathf.Min(localWorkArea.width / rect.width, localWorkArea.height / rect.height);
+            parent = p;
+            return true;
         }
 
         /// <summary>
@@ -419,7 +483,16 @@ namespace BIG.Unity.Overlay
                 }
             }
 
-            SnapContentToCorner(_startCorner, 0);
+            ApplyStartPlacement();
+        }
+
+        /// <summary> First launch (and off-monitor fallback): fullscreen on the primary monitor, or Start Corner. </summary>
+        private void ApplyStartPlacement()
+        {
+            if (_startFullscreen)
+                FitContentToMonitor(0);
+            else
+                SnapContentToCorner(_startCorner, 0);
         }
 
         /// <summary> Persists content position and scale — restored on the next launch. Called automatically after drag/scale. </summary>

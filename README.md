@@ -37,12 +37,14 @@ your UI.
 3. Add **OverlayWindow** to any scene object and assign the `UniWindowController` reference.
 4. Assign **Content** — the RectTransform of your whole game panel (single-point anchors, any pivot).
 5. Assign **Move Handle** — the rect the player grabs to drag the content (e.g. a title label).
-6. Set **Start Corner** and the **Min/Max Scale** constraints.
+6. Set **Start Fullscreen** (or **Start Corner**) and the **Min/Max Scale** constraints.
 
-The game starts hidden off-screen and appears already transparent, with the content flush to the chosen
-corner of the primary monitor's work area (above the taskbar). After the player drags or scales the
-content, its position and scale persist and are restored on the next launch. Corners stay available as
-one-shot moves — `OverlayWindow.Instance.SnapContentToCorner(...)` or wire a button to `SnapContentToCorner(int)`.
+The game starts hidden off-screen and appears already transparent. On first launch the content fills
+the primary monitor's work area (above the taskbar) — the overlay's "fullscreen"; scrolling shrinks it
+into a desktop panel. Turn **Start Fullscreen** off to start flush to **Start Corner** instead. After the
+player drags or scales the content, its position and scale persist and are restored on the next launch.
+Fullscreen and corners stay available as one-shot moves — `OverlayWindow.Instance.FitContentToMonitor(...)`,
+`SnapContentToCorner(...)`, or wire a button to `SnapContentToCorner(int)`.
 
 ### 2. Click-through and hover
 1. Fill the **Hit Area** list with the RectTransforms of your interactive panels (the Move Handle is
@@ -69,7 +71,9 @@ public class MyOverlayView : BaseBehaviour
   * when your game claims a gesture for itself (e.g. a chess piece got picked up on uGUI drag start),
     call `OverlayWindow.Instance.CancelDrag()` — the window drag is cancelled and the position restored.
 * Scroll over the hit area → the content scales within **Min/Max Scale** (**Scroll Scale Step** per notch;
-  set it to 0 when your game uses the wheel itself and call `SetContentScale` on your own).
+  set it to 0 when your game uses the wheel itself and call `SetContentScale` on your own). The effective
+  max stretches up to the fullscreen fit, so scrolling up can always bring the content back to filling
+  the primary monitor even when **Max Scale** is smaller.
 * Position and scale save automatically (on release / when the cursor leaves the overlay).
 
 ### 4. Mouse wheel without focus
