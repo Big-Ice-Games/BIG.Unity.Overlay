@@ -90,7 +90,13 @@ Note: `OverlayWindow` drains this counter for scroll scaling — with your own w
 Add **AutostartToggleView** to a `Toggle` in your settings UI. Optionally set **Steam App Id** —
 the shortcut then launches the game through the Steam client; with 0 it points straight at the exe.
 
-### 6. Settings keys
+### 6. Always on top
+The overlay starts above every other window. To let the player opt out (the game then hides behind
+other applications like a normal window), add **TopmostToggleView** to a `Toggle` in your settings UI —
+or call `OverlayWindow.Instance.SetAlwaysOnTop(bool)` yourself. The choice persists and is restored
+on the next launch; the saved choice beats the `UniWindowController` inspector value.
+
+### 7. Settings keys
 Content position/scale are stored through BIG's `IUserData`. Run **BIG > Generate User Keys** to access
 them in code as `Keys.Overlay.*`.
 

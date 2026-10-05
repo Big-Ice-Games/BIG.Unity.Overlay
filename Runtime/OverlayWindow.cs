@@ -37,6 +37,7 @@ namespace BIG.Unity.Overlay
         public static readonly UserDataKey PositionX = new UserDataKey("OVERLAY_POS_X");
         public static readonly UserDataKey PositionY = new UserDataKey("OVERLAY_POS_Y");
         public static readonly UserDataKey Scale = new UserDataKey("OVERLAY_SCALE");
+        public static readonly UserDataKey Topmost = new UserDataKey("OVERLAY_TOPMOST");
     }
 
     /// <summary>
@@ -163,12 +164,16 @@ namespace BIG.Unity.Overlay
         private Vector2 _dragOffset;
         private float _scale = 1f;
         private bool _stateDirty;
+        private bool _alwaysOnTop = true;
 
         /// <summary> Whether the global cursor (regardless of click-through) is over the hit area. </summary>
         public bool IsCursorOver => _cursorOver;
 
         /// <summary> Current content scale. </summary>
         public float ContentScale => _scale;
+
+        /// <summary> Whether the overlay window stays above all other windows. </summary>
+        public bool IsAlwaysOnTop => _alwaysOnTop;
 
         protected override void Awake()
         {
@@ -182,6 +187,9 @@ namespace BIG.Unity.Overlay
 
             Instance = this;
             DontDestroyOnLoad(gameObject);
+
+            // Read early (Awake, after injection) so settings views see the right state in their Start.
+            _alwaysOnTop = _userData.GetBool(OverlayUserDataKeysProvider.Topmost, true);
         }
 
         private IEnumerator Start()
@@ -206,6 +214,7 @@ namespace BIG.Unity.Overlay
             Application.runInBackground = true;
 
             _uniWindowController.shouldFitMonitor = false;
+            _uniWindowController.isTopmost = _alwaysOnTop; // the player's saved choice beats the inspector value
             InitializeHitArea();
 
             // UniWinC captures the window and enables transparency in its first Update —
@@ -249,6 +258,20 @@ namespace BIG.Unity.Overlay
         }
 
         #region Window
+
+        /// <summary>
+        /// Always-on-top for the overlay window. On (default) the overlay floats above every other
+        /// application; off makes it an ordinary window that can hide behind others. The choice
+        /// persists through <see cref="IUserData"/> and is restored on the next launch.
+        /// </summary>
+        public void SetAlwaysOnTop(bool alwaysOnTop)
+        {
+            _alwaysOnTop = alwaysOnTop;
+            _userData.Set(OverlayUserDataKeysProvider.Topmost, alwaysOnTop);
+
+            if (!Application.isEditor && _uniWindowController != null)
+                _uniWindowController.isTopmost = alwaysOnTop;
+        }
 
         /// <summary>
         /// Stretch the invisible window over the bounding box of ALL monitors. The window never moves
