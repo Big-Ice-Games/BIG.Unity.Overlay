@@ -19,6 +19,31 @@ namespace BIG.Unity.Overlay
         TopLeft = 3,
     }
 
+    /// <summary>
+    /// How the OS window relates to the content.
+    /// GPU note: with a transparent overlay EVERY window pixel is paid for THREE times per
+    /// frame (Unity renders the backbuffer, the legacy BitBlt swapchain copies it, DWM
+    /// composites it with alpha over the desktop) — the window area, not the content, is
+    /// the overlay's GPU bill.
+    /// </summary>
+    public enum OverlayWindowMode
+    {
+        /// <summary>
+        /// The window invisibly covers ALL monitors and never moves; only the content rect
+        /// travels inside it. Zero window moves/resizes, but the full virtual desktop is
+        /// rendered and composited every frame — fine for simple overlays, expensive on
+        /// big/multi-monitor setups.
+        /// </summary>
+        CoverDesktop = 0,
+        /// <summary>
+        /// The window is exactly the scaled content (+ Window Margin) and MOVES with it —
+        /// dragging the content drags the OS window, scaling resizes it. The backbuffer and
+        /// the DWM composition pay only for the panel, not the desktop (the fix for the
+        /// "idle overlay eats half the GPU" problem).
+        /// </summary>
+        FitContent = 1,
+    }
+
     /// <summary> Raised when the global cursor enters or leaves the overlay hit area. </summary>
     public readonly struct OverlayHoverChanged
     {
@@ -43,11 +68,18 @@ namespace BIG.Unity.Overlay
     /// <summary>
     /// The one overlay component.
     ///
-    /// WINDOW — the OS window is an invisible layer automatically stretched over the ENTIRE virtual desktop
-    /// (all monitors, kept in sync when the monitor layout changes). It never moves and never resizes,
-    /// so there is no window flicker — what the player drags and scales is the CONTENT rect (your game panel),
-    /// with pure uGUI: smoothly, across monitors, like moving a sticker over the desktop.
-    /// The window starts parked off-screen (see OverlayBootstrap) and shows up only here, already transparent.
+    /// WINDOW — two modes (<see cref="OverlayWindowMode"/>):
+    /// CoverDesktop (legacy default): an invisible layer stretched over the ENTIRE virtual desktop
+    /// (all monitors). It never moves and never resizes, so there is no window flicker — what the player
+    /// drags and scales is the CONTENT rect, with pure uGUI. SIMPLE but GPU-EXPENSIVE: a transparent
+    /// window pays per PIXEL OF WINDOW AREA three times a frame (Unity backbuffer render, the legacy
+    /// BitBlt swapchain copy, DWM alpha composition) — on a multi-monitor desktop that is most of a GPU.
+    /// FitContent: the window wraps the scaled content (+ Window Margin) and MOVES with it — dragging
+    /// the content drags the OS window (global-cursor driven), scaling resizes it around its center.
+    /// The desktop is never rendered, only the panel. Prefer this for games; the cost is live window
+    /// moves/resizes during gestures (imperceptible on DWM in practice).
+    /// Either way the window starts parked off-screen (see OverlayBootstrap) and shows up only here,
+    /// already transparent.
     ///
     /// CONTENT — on first launch the content fills the primary monitor's work area (above the taskbar) —
     /// the overlay's "fullscreen"; scroll shrinks it into a panel. With Start Fullscreen off it aligns flush
@@ -77,6 +109,18 @@ namespace BIG.Unity.Overlay
         [Header("Window")]
 #endif
         [SerializeField] private UniWindowController _uniWindowController;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Window")]
+#endif
+        [SerializeField, Tooltip("CoverDesktop: the window spans all monitors and never moves (simple, GPU-expensive). FitContent: the window is the scaled content + margin and moves with it (the whole desktop is no longer rendered/composited every frame).")]
+        private OverlayWindowMode _windowMode = OverlayWindowMode.CoverDesktop;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Window")]
+#endif
+        [SerializeField, Tooltip("FitContent only: transparent padding around the content in physical pixels — room for drop shadows or popups that overhang the panel edge.")]
+        private float _windowMargin = 0f;
 
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
@@ -166,6 +210,15 @@ namespace BIG.Unity.Overlay
         private bool _stateDirty;
         private bool _alwaysOnTop = true;
 
+        // FitContent mode: the window's bottom-left in UniWinC coordinates (the one source of
+        // truth — the controller's getter can lag a frame behind a just-issued move).
+        private Vector2 _windowUniwinPosition;
+        private Vector2 _pressCursorUniwin;
+        private Vector2 _dragStartWindowPosition;
+        private Vector2 _dragOffsetUniwin;
+
+        private bool FitsContent => _windowMode == OverlayWindowMode.FitContent;
+
         /// <summary> Whether the global cursor (regardless of click-through) is over the hit area. </summary>
         public bool IsCursorOver => _cursorOver;
 
@@ -222,12 +275,24 @@ namespace BIG.Unity.Overlay
             yield return null;
             yield return null;
 
-            CoverVirtualDesktop();
-            PositionContent();
+            if (FitsContent)
+            {
+                RestoreWindowPlacement();
 
-            // Window style changes (borderless/layered) can move the window once more a moment later.
-            yield return new WaitForSecondsRealtime(0.5f);
-            CoverVirtualDesktop();
+                // Window style changes (borderless/layered) can move the window once more a
+                // moment later — re-assert the placement we decided on.
+                yield return new WaitForSecondsRealtime(0.5f);
+                ApplyWindowRect(_windowUniwinPosition, _scale);
+            }
+            else
+            {
+                CoverVirtualDesktop();
+                PositionContent();
+
+                // Window style changes (borderless/layered) can move the window once more a moment later.
+                yield return new WaitForSecondsRealtime(0.5f);
+                CoverVirtualDesktop();
+            }
 
             _uniWindowController.OnMonitorChanged += HandleMonitorChanged;
         }
@@ -247,6 +312,12 @@ namespace BIG.Unity.Overlay
 
         private void Update()
         {
+            // FitContent: the canvas tracks the window size with a frame of lag (Screen
+            // resolution updates after the resize lands) — keep the content centered every
+            // frame instead of chasing callbacks. Idempotent, allocation-free.
+            if (FitsContent && _hitAreaActive)
+                CenterContent();
+
             if (!_hitAreaActive)
                 return;
 
@@ -300,6 +371,14 @@ namespace BIG.Unity.Overlay
 
         private void HandleMonitorChanged()
         {
+            if (FitsContent)
+            {
+                // When the monitor with the window got detached, pull it back to the start placement.
+                if (!IsVisibleOnAnyMonitor(new Rect(_windowUniwinPosition, WindowSizeFor(_scale))))
+                    ApplyStartPlacement();
+                return;
+            }
+
             CoverVirtualDesktop();
 
             if (_content == null || !TryGetContentScreenRect(out Rect contentRect))
@@ -308,6 +387,96 @@ namespace BIG.Unity.Overlay
             // When the monitor with the content got detached, pull the content back to the start placement.
             if (!IsVisibleOnAnyMonitor(ScreenToUniWin(contentRect)))
                 ApplyStartPlacement();
+        }
+
+        #endregion
+
+        #region FitContent window
+
+        /// <summary> Window size (physical px) that wraps the content at <paramref name="scale"/> plus the margin. </summary>
+        private Vector2 WindowSizeFor(float scale)
+        {
+            Vector2 size = _content != null ? _content.rect.size : new Vector2(100f, 100f);
+            size = size * scale + 2f * _windowMargin * Vector2.one;
+            return new Vector2(Mathf.Max(50f, Mathf.Round(size.x)), Mathf.Max(50f, Mathf.Round(size.y)));
+        }
+
+        /// <summary>
+        /// THE one writer of the window rect in FitContent mode: clamps the scale, resizes the
+        /// window to wrap the scaled content and moves it to <paramref name="uniwinPosition"/>
+        /// (bottom-left, UniWinC coordinates). The content itself just stays centered (Update).
+        /// </summary>
+        private void ApplyWindowRect(Vector2 uniwinPosition, float scale)
+        {
+            _scale = Mathf.Clamp(scale, _minScale, MaxScaleNow());
+            _windowUniwinPosition = new Vector2(Mathf.Round(uniwinPosition.x), Mathf.Round(uniwinPosition.y));
+
+            _uniWindowController.windowSize = WindowSizeFor(_scale);
+            _uniWindowController.windowPosition = _windowUniwinPosition;
+
+            if (_content != null)
+                _content.localScale = new Vector3(_scale, _scale, 1f);
+            CenterContent();
+            _stateDirty = true;
+        }
+
+        /// <summary> The scroll-scale ceiling: the inspector max, stretched up to the fullscreen fit like CoverDesktop mode. </summary>
+        private float MaxScaleNow()
+        {
+            float max = _maxScale;
+            if (FitsContent && _content != null)
+            {
+                Rect area = ResolveWorkArea(0);
+                Rect rect = _content.rect;
+                if (rect.width > 0f && rect.height > 0f && area.width > 0f && area.height > 0f)
+                {
+                    float fit = Mathf.Min(
+                        (area.width - 2f * _windowMargin) / rect.width,
+                        (area.height - 2f * _windowMargin) / rect.height);
+                    max = Mathf.Max(max, fit);
+                }
+            }
+            return max;
+        }
+
+        /// <summary>
+        /// Pins the scaled content to the canvas center (the window wraps it exactly, so
+        /// centered == filling the window minus the margin). Works with any single-point
+        /// anchors/pivot the consumer scene uses.
+        /// </summary>
+        private void CenterContent()
+        {
+            if (_content == null || _content.parent is not RectTransform parent)
+                return;
+
+            Vector2 target = parent.rect.center - AnchorReference(parent, _content) - _content.rect.center * _scale;
+            if ((_content.anchoredPosition - target).sqrMagnitude > 0.25f)
+                _content.anchoredPosition = target;
+        }
+
+        /// <summary> FitContent boot: the saved window spot + scale, or the start placement. </summary>
+        private void RestoreWindowPlacement()
+        {
+            float scale = Mathf.Clamp(_userData.GetFloat(OverlayUserDataKeysProvider.Scale, 1f), _minScale, MaxScaleNow());
+
+            if (_userData.GetBool(OverlayUserDataKeysProvider.Saved))
+            {
+                var position = new Vector2(
+                    _userData.GetFloat(OverlayUserDataKeysProvider.PositionX),
+                    _userData.GetFloat(OverlayUserDataKeysProvider.PositionY));
+
+                // Monitor layout could have changed since the save (and pre-FitContent saves
+                // held CONTENT coordinates) — restore only a spot that is still on a monitor.
+                if (IsVisibleOnAnyMonitor(new Rect(position, WindowSizeFor(scale))))
+                {
+                    ApplyWindowRect(position, scale);
+                    _stateDirty = false;
+                    return;
+                }
+            }
+
+            _scale = scale;
+            ApplyStartPlacement();
         }
 
         #endregion
@@ -333,6 +502,16 @@ namespace BIG.Unity.Overlay
             bool left = corner is OverlayCorner.BottomLeft or OverlayCorner.TopLeft;
             bool bottom = corner is OverlayCorner.BottomRight or OverlayCorner.BottomLeft;
 
+            if (FitsContent)
+            {
+                // The window IS the panel — snap the window rect itself.
+                Vector2 size = WindowSizeFor(_scale);
+                ApplyWindowRect(new Vector2(
+                    left ? workArea.xMin : workArea.xMax - size.x,
+                    bottom ? workArea.yMin : workArea.yMax - size.y), _scale);
+                return;
+            }
+
             // Work area corner: UniWinC coords -> window client -> screen pixels -> parent local.
             var uniwinCorner = new Vector2(left ? workArea.xMin : workArea.xMax, bottom ? workArea.yMin : workArea.yMax);
             Vector2 screenCorner = UniWinToScreen(uniwinCorner);
@@ -353,6 +532,16 @@ namespace BIG.Unity.Overlay
         /// </summary>
         public void SetContentScale(float scale)
         {
+            if (FitsContent && !Application.isEditor && _uniWindowController != null)
+            {
+                // Resize the window around its CENTER so zooming does not walk the panel.
+                Vector2 oldSize = WindowSizeFor(_scale);
+                float clamped = Mathf.Clamp(scale, _minScale, MaxScaleNow());
+                Vector2 newSize = WindowSizeFor(clamped);
+                ApplyWindowRect(_windowUniwinPosition + (oldSize - newSize) * 0.5f, clamped);
+                return;
+            }
+
             float max = _maxScale;
             if (TryGetFitScale(0, out float fit, out _, out _))
                 max = Mathf.Max(max, fit);
@@ -369,6 +558,24 @@ namespace BIG.Unity.Overlay
         /// </summary>
         public void FitContentToMonitor(int monitorIndex = 0)
         {
+            if (FitsContent)
+            {
+                if (Application.isEditor || _uniWindowController == null || _content == null)
+                    return;
+
+                Rect workArea = ResolveWorkArea(monitorIndex);
+                Rect rect = _content.rect;
+                if (rect.width <= 0f || rect.height <= 0f || workArea.width <= 0f || workArea.height <= 0f)
+                    return;
+
+                float fitScale = Mathf.Min(
+                    (workArea.width - 2f * _windowMargin) / rect.width,
+                    (workArea.height - 2f * _windowMargin) / rect.height);
+                fitScale = Mathf.Max(fitScale, _minScale);
+                ApplyWindowRect(workArea.center - WindowSizeFor(fitScale) * 0.5f, fitScale);
+                return;
+            }
+
             if (!TryGetFitScale(monitorIndex, out float fit, out Rect area, out RectTransform parent))
                 return;
 
@@ -421,8 +628,13 @@ namespace BIG.Unity.Overlay
             if (!_dragArmed && !_dragging)
                 return;
 
-            if (_dragging && _content != null)
-                _content.anchoredPosition = _dragStartContentPosition;
+            if (_dragging)
+            {
+                if (FitsContent)
+                    ApplyWindowRect(_dragStartWindowPosition, _scale);
+                else if (_content != null)
+                    _content.anchoredPosition = _dragStartContentPosition;
+            }
 
             _dragArmed = false;
             _dragging = false;
@@ -430,6 +642,12 @@ namespace BIG.Unity.Overlay
 
         private void UpdateDrag(bool cursorValid, Vector2 screenPoint)
         {
+            if (FitsContent)
+            {
+                UpdateWindowDrag(cursorValid, screenPoint);
+                return;
+            }
+
             bool pressed = IsMousePressed();
 
             if (_dragArmed || _dragging)
@@ -464,6 +682,55 @@ namespace BIG.Unity.Overlay
             {
                 _pressScreenPoint = screenPoint;
                 _dragStartContentPosition = _content.anchoredPosition;
+                _dragArmed = true;
+            }
+
+            _mouseWasPressed = pressed;
+        }
+
+        /// <summary>
+        /// FitContent drag: the gesture moves the OS WINDOW, driven by the GLOBAL cursor
+        /// (UniWinC coordinates) — window-local points would chase a moving origin. The press
+        /// is still validated window-locally (move handle, not over a Selectable).
+        /// </summary>
+        private void UpdateWindowDrag(bool cursorValid, Vector2 screenPoint)
+        {
+            bool pressed = IsMousePressed();
+            Vector2 cursorUniwin = _uniWindowController.cursorPosition;
+
+            if (_dragArmed || _dragging)
+            {
+                if (!pressed)
+                {
+                    if (_dragging)
+                        SaveContentState();
+                    _dragArmed = false;
+                    _dragging = false;
+                }
+                else if (_dragArmed
+                         && (cursorUniwin - _pressCursorUniwin).sqrMagnitude >= DRAG_THRESHOLD * DRAG_THRESHOLD)
+                {
+                    // Threshold crossed — rebase the offset here, so the window starts moving without a jump.
+                    _dragOffsetUniwin = cursorUniwin - _windowUniwinPosition;
+                    _dragArmed = false;
+                    _dragging = true;
+                }
+                else if (_dragging)
+                {
+                    // Position only — no resize mid-drag, the cheapest possible window move.
+                    _windowUniwinPosition = new Vector2(
+                        Mathf.Round(cursorUniwin.x - _dragOffsetUniwin.x),
+                        Mathf.Round(cursorUniwin.y - _dragOffsetUniwin.y));
+                    _uniWindowController.windowPosition = _windowUniwinPosition;
+                    _stateDirty = true;
+                }
+            }
+            else if (pressed && !_mouseWasPressed && cursorValid
+                     && IsOverRect(_moveHandle, screenPoint)
+                     && !IsOverSelectable(screenPoint))
+            {
+                _pressCursorUniwin = cursorUniwin;
+                _dragStartWindowPosition = _windowUniwinPosition;
                 _dragArmed = true;
             }
 
@@ -525,7 +792,11 @@ namespace BIG.Unity.Overlay
                 return;
 
             _stateDirty = false;
-            Vector2 position = _content.anchoredPosition;
+            // FitContent persists the WINDOW spot (UniWinC coords); CoverDesktop the content's
+            // anchored position — RestoreWindowPlacement/PositionContent read the matching one
+            // and both validate against the monitors, so a mode switch degrades to the start
+            // placement instead of a garbage spot.
+            Vector2 position = FitsContent ? _windowUniwinPosition : _content.anchoredPosition;
             _userData.Set(OverlayUserDataKeysProvider.Saved, true);
             _userData.Set(OverlayUserDataKeysProvider.PositionX, position.x);
             _userData.Set(OverlayUserDataKeysProvider.PositionY, position.y);
