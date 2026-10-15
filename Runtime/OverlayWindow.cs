@@ -414,6 +414,13 @@ namespace BIG.Unity.Overlay
             _uniWindowController.windowSize = WindowSizeFor(_scale);
             _uniWindowController.windowPosition = _windowUniwinPosition;
 
+            // A resize can drop the DWM transparency state (observed as a BLACK backdrop when
+            // the window grows to ~monitor size). SetTransparent has no equality guard, so
+            // re-asserting actually re-runs EnableTransparent — cheap, and only on rect
+            // changes (boot, zoom, snaps), never per drag frame.
+            if (_uniWindowController.isTransparent)
+                _uniWindowController.isTransparent = true;
+
             if (_content != null)
                 _content.localScale = new Vector3(_scale, _scale, 1f);
             CenterContent();
@@ -563,7 +570,12 @@ namespace BIG.Unity.Overlay
                 if (Application.isEditor || _uniWindowController == null || _content == null)
                     return;
 
+                // Inset: a borderless window that EXACTLY covers a monitor gets promoted by
+                // DWM to the fullscreen presentation path, which skips the alpha composition
+                // (the backdrop turns black). A few px of slack keeps it an ordinary
+                // composited window; the content fit is min-axis anyway, so nobody sees it.
                 Rect workArea = ResolveWorkArea(monitorIndex);
+                workArea = Rect.MinMaxRect(workArea.xMin + 2f, workArea.yMin + 2f, workArea.xMax - 2f, workArea.yMax - 2f);
                 Rect rect = _content.rect;
                 if (rect.width <= 0f || rect.height <= 0f || workArea.width <= 0f || workArea.height <= 0f)
                     return;
