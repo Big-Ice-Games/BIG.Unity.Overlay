@@ -470,13 +470,14 @@ namespace BIG.Unity.Overlay
 
             if (needed.x > _windowSize.x || needed.y > _windowSize.y)
             {
+                // Zooming IN: grow straight to the monitor's work area (minus the fullscreen-path
+                // inset) — the rest of the gesture then zooms inside without another resize, and
+                // the settle shrinks it once at the end: two blinks per gesture, whatever its
+                // length (a small headroom resized every 1-2 notches — user: "zoom-in blinks").
                 Rect area = ResolveWorkArea(0);
                 Vector2 grown = needed * ZOOM_GROW_HEADROOM;
                 if (area.width > 0f && area.height > 0f)
-                {
-                    // Headroom never past the monitor (minus the fullscreen-path inset), never below the need.
-                    grown = new Vector2(Mathf.Min(grown.x, area.width - 4f), Mathf.Min(grown.y, area.height - 4f));
-                }
+                    grown = new Vector2(area.width - 4f, area.height - 4f);
                 grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
                 SetWindowRect(center - grown * 0.5f, grown);
             }
