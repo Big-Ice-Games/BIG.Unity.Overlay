@@ -145,7 +145,7 @@ namespace BIG.Unity.Overlay
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: presses on Selectables (buttons, sliders...) never start the drag, and the game can reclaim a gesture with CancelDrag() (e.g. when a chess piece got picked up). Counts as hit area automatically.")]
+        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: presses on Selectables (buttons, sliders...) and on anything with an IDragHandler in its parents (scroll views!) never start the drag, and the game can reclaim a gesture with CancelDrag() (e.g. when a chess piece got picked up). Counts as hit area automatically.")]
         private RectTransform _moveHandle;
 
 #if ODIN_INSPECTOR
@@ -690,7 +690,7 @@ namespace BIG.Unity.Overlay
             }
             else if (pressed && !_mouseWasPressed && cursorValid
                      && _content != null && IsOverRect(_moveHandle, screenPoint)
-                     && !IsOverSelectable(screenPoint))
+                     && !IsOverGestureClaimer(screenPoint))
             {
                 _pressScreenPoint = screenPoint;
                 _dragStartContentPosition = _content.anchoredPosition;
@@ -739,7 +739,7 @@ namespace BIG.Unity.Overlay
             }
             else if (pressed && !_mouseWasPressed && cursorValid
                      && IsOverRect(_moveHandle, screenPoint)
-                     && !IsOverSelectable(screenPoint))
+                     && !IsOverGestureClaimer(screenPoint))
             {
                 _pressCursorUniwin = cursorUniwin;
                 _dragStartWindowPosition = _windowUniwinPosition;
@@ -1033,11 +1033,16 @@ namespace BIG.Unity.Overlay
         private static readonly List<RaycastResult> RAYCAST_RESULTS = new List<RaycastResult>(16);
 
         /// <summary>
-        /// True when the press landed on a Selectable widget (button, slider, toggle, dropdown...) —
-        /// those always win over the content drag. Checked on the TOP raycast hit only (the element
-        /// that actually receives the uGUI events).
+        /// True when the press landed on a widget that claims the gesture for itself — those
+        /// always win over the content drag. Two families, checked on the TOP raycast hit only
+        /// (the element that actually receives the uGUI events):
+        /// Selectables (button, slider, toggle, dropdown...), and anything with an
+        /// <see cref="IDragHandler"/> in its parents — a ScrollRect viewport first of all, so
+        /// panning a scroll view (progression tree, stash list) scrolls the CONTENT instead of
+        /// dragging the window. A custom "no window drag here" zone needs no plugin support:
+        /// give the rect any IDragHandler (an empty one suffices).
         /// </summary>
-        private bool IsOverSelectable(Vector2 screenPoint)
+        private bool IsOverGestureClaimer(Vector2 screenPoint)
         {
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem == null)
@@ -1047,8 +1052,13 @@ namespace BIG.Unity.Overlay
             RAYCAST_RESULTS.Clear();
             eventSystem.RaycastAll(pointer, RAYCAST_RESULTS);
 
-            bool over = RAYCAST_RESULTS.Count > 0
-                        && RAYCAST_RESULTS[0].gameObject.GetComponentInParent<Selectable>() != null;
+            bool over = false;
+            if (RAYCAST_RESULTS.Count > 0)
+            {
+                GameObject top = RAYCAST_RESULTS[0].gameObject;
+                over = top.GetComponentInParent<Selectable>() != null
+                    || top.GetComponentInParent<IDragHandler>() != null;
+            }
 
             RAYCAST_RESULTS.Clear();
             return over;
