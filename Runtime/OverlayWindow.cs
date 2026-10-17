@@ -322,7 +322,10 @@ namespace BIG.Unity.Overlay
             // resolution updates after the resize lands) — keep the content centered every
             // frame instead of chasing callbacks. Idempotent, allocation-free.
             if (FitsContent && _hitAreaActive)
+            {
                 CenterContent();
+                UpdateZoomSettle();
+            }
 
             if (!_hitAreaActive)
                 return;
@@ -415,9 +418,22 @@ namespace BIG.Unity.Overlay
         private void ApplyWindowRect(Vector2 uniwinPosition, float scale)
         {
             _scale = Mathf.Clamp(scale, _minScale, MaxScaleNow());
-            _windowUniwinPosition = new Vector2(Mathf.Round(uniwinPosition.x), Mathf.Round(uniwinPosition.y));
+            SetWindowRect(uniwinPosition, WindowSizeFor(_scale));
+            _zoomSettlePending = false;
 
-            _uniWindowController.windowSize = WindowSizeFor(_scale);
+            if (_content != null)
+                _content.localScale = new Vector3(_scale, _scale, 1f);
+            CenterContent();
+            _stateDirty = true;
+        }
+
+        /// <summary> The native write of the window rect (FitContent) — every call costs a swapchain resize, so callers batch. </summary>
+        private void SetWindowRect(Vector2 uniwinPosition, Vector2 size)
+        {
+            _windowUniwinPosition = new Vector2(Mathf.Round(uniwinPosition.x), Mathf.Round(uniwinPosition.y));
+            _windowSize = size;
+
+            _uniWindowController.windowSize = size;
             _uniWindowController.windowPosition = _windowUniwinPosition;
 
             // A resize can drop the DWM transparency state (observed as a BLACK backdrop when
@@ -425,14 +441,65 @@ namespace BIG.Unity.Overlay
             // re-asserting actually re-runs EnableTransparent — which re-composes the window
             // and made EVERY scroll-zoom step blink. Only near-monitor-sized windows (the case
             // that lost the alpha) re-assert it now.
-            if (_uniWindowController.isTransparent && IsNearMonitorSize(_uniWindowController.windowSize))
+            if (_uniWindowController.isTransparent && IsNearMonitorSize(size))
                 _uniWindowController.isTransparent = true;
+        }
 
+        // ---- Zoom without blinking (FitContent) ----
+        // Resizing a transparent window makes Unity show one empty frame (the desktop shines
+        // through) — once per scroll notch that read as constant blinking. Zoom now scales the
+        // content INSIDE the current window; the window only GROWS (with headroom, so the next
+        // notches fit) when the content outgrows it, and shrinks back once, after the wheel
+        // has rested — and only when the leftover margin is worth a blink.
+
+        /// <summary> The window's real size (physical px) — may exceed the content fit while a zoom settles. </summary>
+        private Vector2 _windowSize;
+        private bool _zoomSettlePending;
+        private float _zoomSettleAt;
+        private const float ZOOM_GROW_HEADROOM = 1.15f;
+        private const float ZOOM_SHRINK_THRESHOLD = 1.2f;
+        private const float ZOOM_SETTLE_SECONDS = 0.6f;
+
+        private void ZoomInsideWindow(float clamped)
+        {
+            Vector2 center = _windowUniwinPosition + _windowSize * 0.5f;
+            Vector2 needed = WindowSizeFor(clamped);
+            _scale = clamped;
             if (_content != null)
                 _content.localScale = new Vector3(_scale, _scale, 1f);
+
+            if (needed.x > _windowSize.x || needed.y > _windowSize.y)
+            {
+                Rect area = ResolveWorkArea(0);
+                Vector2 grown = needed * ZOOM_GROW_HEADROOM;
+                if (area.width > 0f && area.height > 0f)
+                {
+                    // Headroom never past the monitor (minus the fullscreen-path inset), never below the need.
+                    grown = new Vector2(Mathf.Min(grown.x, area.width - 4f), Mathf.Min(grown.y, area.height - 4f));
+                }
+                grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
+                SetWindowRect(center - grown * 0.5f, grown);
+            }
+
             CenterContent();
+            _zoomSettlePending = true;
+            _zoomSettleAt = Time.unscaledTime + ZOOM_SETTLE_SECONDS;
             _stateDirty = true;
         }
+
+        /// <summary> After the wheel rested: shrink an oversized window back around its center (one resize at most). </summary>
+        private void UpdateZoomSettle()
+        {
+            if (!_zoomSettlePending || Time.unscaledTime < _zoomSettleAt)
+                return;
+            _zoomSettlePending = false;
+            Vector2 exact = WindowSizeFor(_scale);
+            if (_windowSize.x > exact.x * ZOOM_SHRINK_THRESHOLD || _windowSize.y > exact.y * ZOOM_SHRINK_THRESHOLD)
+                SetWindowRect(_windowUniwinPosition + (_windowSize - exact) * 0.5f, exact);
+        }
+
+        /// <summary> The window spot an EXACT content fit would have (what saves/restores use while a zoom settles). </summary>
+        private Vector2 FittedWindowPosition => _windowUniwinPosition + (_windowSize - WindowSizeFor(_scale)) * 0.5f;
 
         /// <summary> The window covers ~a monitor in either axis — where DWM may drop the alpha composition. </summary>
         private bool IsNearMonitorSize(Vector2 windowSize)
@@ -557,14 +624,11 @@ namespace BIG.Unity.Overlay
             if (FitsContent && !Application.isEditor && _uniWindowController != null)
             {
                 // Resize the window around its CENTER so zooming does not walk the panel.
-                Vector2 oldSize = WindowSizeFor(_scale);
+                // Scrolling past the min/max changes nothing — do not touch anything.
                 float clamped = Mathf.Clamp(scale, _minScale, MaxScaleNow());
-                Vector2 newSize = WindowSizeFor(clamped);
-                // Scrolling past the min/max (or a sub-pixel step) changes nothing — do not
-                // touch the native window at all (every resize call costs a re-composition).
-                if (newSize == oldSize)
+                if (Mathf.Approximately(clamped, _scale))
                     return;
-                ApplyWindowRect(_windowUniwinPosition + (oldSize - newSize) * 0.5f, clamped);
+                ZoomInsideWindow(clamped);
                 return;
             }
 
@@ -832,7 +896,7 @@ namespace BIG.Unity.Overlay
             // anchored position — RestoreWindowPlacement/PositionContent read the matching one
             // and both validate against the monitors, so a mode switch degrades to the start
             // placement instead of a garbage spot.
-            Vector2 position = FitsContent ? _windowUniwinPosition : _content.anchoredPosition;
+            Vector2 position = FitsContent ? FittedWindowPosition : _content.anchoredPosition;
             _userData.Set(OverlayUserDataKeysProvider.Saved, true);
             _userData.Set(OverlayUserDataKeysProvider.PositionX, position.x);
             _userData.Set(OverlayUserDataKeysProvider.PositionY, position.y);
