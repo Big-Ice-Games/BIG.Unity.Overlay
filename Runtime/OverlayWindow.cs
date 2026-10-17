@@ -331,7 +331,7 @@ namespace BIG.Unity.Overlay
 
             UpdateHover(cursorValid, screenPoint);
             UpdateDrag(cursorValid, screenPoint);
-            UpdateScrollScale();
+            UpdateScrollScale(cursorValid, screenPoint);
         }
 
         #region Window
@@ -422,15 +422,24 @@ namespace BIG.Unity.Overlay
 
             // A resize can drop the DWM transparency state (observed as a BLACK backdrop when
             // the window grows to ~monitor size). SetTransparent has no equality guard, so
-            // re-asserting actually re-runs EnableTransparent — cheap, and only on rect
-            // changes (boot, zoom, snaps), never per drag frame.
-            if (_uniWindowController.isTransparent)
+            // re-asserting actually re-runs EnableTransparent — which re-composes the window
+            // and made EVERY scroll-zoom step blink. Only near-monitor-sized windows (the case
+            // that lost the alpha) re-assert it now.
+            if (_uniWindowController.isTransparent && IsNearMonitorSize(_uniWindowController.windowSize))
                 _uniWindowController.isTransparent = true;
 
             if (_content != null)
                 _content.localScale = new Vector3(_scale, _scale, 1f);
             CenterContent();
             _stateDirty = true;
+        }
+
+        /// <summary> The window covers ~a monitor in either axis — where DWM may drop the alpha composition. </summary>
+        private bool IsNearMonitorSize(Vector2 windowSize)
+        {
+            Rect area = ResolveWorkArea(0);
+            return area.width > 0f && area.height > 0f
+                   && (windowSize.x >= area.width * 0.9f || windowSize.y >= area.height * 0.9f);
         }
 
         /// <summary> The scroll-scale ceiling: the inspector max, stretched up to the fullscreen fit like CoverDesktop mode. </summary>
@@ -551,6 +560,10 @@ namespace BIG.Unity.Overlay
                 Vector2 oldSize = WindowSizeFor(_scale);
                 float clamped = Mathf.Clamp(scale, _minScale, MaxScaleNow());
                 Vector2 newSize = WindowSizeFor(clamped);
+                // Scrolling past the min/max (or a sub-pixel step) changes nothing — do not
+                // touch the native window at all (every resize call costs a re-composition).
+                if (newSize == oldSize)
+                    return;
                 ApplyWindowRect(_windowUniwinPosition + (oldSize - newSize) * 0.5f, clamped);
                 return;
             }
@@ -755,7 +768,7 @@ namespace BIG.Unity.Overlay
             _mouseWasPressed = pressed;
         }
 
-        private void UpdateScrollScale()
+        private void UpdateScrollScale(bool cursorValid, Vector2 screenPoint)
         {
             // Step 0 = the game owns the wheel — do NOT touch the shared GlobalMouseScroll counter at all.
             if (_scrollScaleStep <= 0f || _content == null)
@@ -764,6 +777,11 @@ namespace BIG.Unity.Overlay
             // Drain the counter every frame; apply only when the cursor is over the overlay.
             float notches = GlobalMouseScroll.ConsumeNotches();
             if (!_cursorOver || notches == 0f)
+                return;
+
+            // A ScrollRect under the cursor owns the wheel (it scrolls its content) — zooming the
+            // window at the same time made scroll views jump/blink. Same rule as the drag claim.
+            if (cursorValid && IsOverScrollRect(screenPoint))
                 return;
 
             SetContentScale(_scale * (1f + notches * _scrollScaleStep));
@@ -1072,6 +1090,21 @@ namespace BIG.Unity.Overlay
                     || top.GetComponentInParent<ScrollRect>() != null;
             }
 
+            RAYCAST_RESULTS.Clear();
+            return over;
+        }
+
+        /// <summary> The TOP raycast hit sits inside a ScrollRect (the wheel claim — see UpdateScrollScale). </summary>
+        private static bool IsOverScrollRect(Vector2 screenPoint)
+        {
+            EventSystem eventSystem = EventSystem.current;
+            if (eventSystem == null)
+                return false;
+
+            var pointer = new PointerEventData(eventSystem) { position = screenPoint };
+            RAYCAST_RESULTS.Clear();
+            eventSystem.RaycastAll(pointer, RAYCAST_RESULTS);
+            bool over = RAYCAST_RESULTS.Count > 0 && RAYCAST_RESULTS[0].gameObject.GetComponentInParent<ScrollRect>() != null;
             RAYCAST_RESULTS.Clear();
             return over;
         }
