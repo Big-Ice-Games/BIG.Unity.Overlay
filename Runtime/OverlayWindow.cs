@@ -456,8 +456,10 @@ namespace BIG.Unity.Overlay
         private Vector2 _windowSize;
         private bool _zoomSettlePending;
         private float _zoomSettleAt;
-        private const float ZOOM_GROW_HEADROOM = 1.15f;
-        private const float ZOOM_SHRINK_THRESHOLD = 1.2f;
+        private const float ZOOM_GROW_HEADROOM = 1.4f;
+        /// <summary> The headroom alone never grows the window past this share of the monitor (DWM black-backdrop zone). </summary>
+        private const float ZOOM_HEADROOM_MONITOR_CAP = 0.8f;
+        private const float ZOOM_SHRINK_THRESHOLD = 1.15f;
         private const float ZOOM_SETTLE_SECONDS = 0.6f;
 
         private void ZoomInsideWindow(float clamped)
@@ -470,14 +472,17 @@ namespace BIG.Unity.Overlay
 
             if (needed.x > _windowSize.x || needed.y > _windowSize.y)
             {
-                // Zooming IN: grow straight to the monitor's work area (minus the fullscreen-path
-                // inset) — the rest of the gesture then zooms inside without another resize, and
-                // the settle shrinks it once at the end: two blinks per gesture, whatever its
-                // length (a small headroom resized every 1-2 notches — user: "zoom-in blinks").
+                // Zooming IN: grow with a generous headroom (3-4 notches fit before the next
+                // resize) but NEVER near monitor size from the headroom alone — a ~monitor-sized
+                // window makes DWM drop the alpha composition (black backdrop; growing straight
+                // to the work area showed exactly that). Only the content need itself may go there.
                 Rect area = ResolveWorkArea(0);
                 Vector2 grown = needed * ZOOM_GROW_HEADROOM;
                 if (area.width > 0f && area.height > 0f)
-                    grown = new Vector2(area.width - 4f, area.height - 4f);
+                {
+                    grown = new Vector2(Mathf.Min(grown.x, area.width * ZOOM_HEADROOM_MONITOR_CAP),
+                        Mathf.Min(grown.y, area.height * ZOOM_HEADROOM_MONITOR_CAP));
+                }
                 grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
                 SetWindowRect(center - grown * 0.5f, grown);
             }
