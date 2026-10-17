@@ -145,8 +145,14 @@ namespace BIG.Unity.Overlay
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
 #endif
-        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: presses on Selectables (buttons, sliders...) and on anything with an IDragHandler in its parents (scroll views!) never start the drag, and the game can reclaim a gesture with CancelDrag() (e.g. when a chess piece got picked up). Counts as hit area automatically.")]
+        [SerializeField, Tooltip("Grab this rect to drag the content around the desktop — can safely be the WHOLE content: presses on Selectables (buttons, sliders...), inside any ScrollRect (panning scrolls the content, not the window) or inside a Drag Exception rect never start the drag, and the game can reclaim a gesture with CancelDrag() (e.g. when a chess piece got picked up). Counts as hit area automatically.")]
         private RectTransform _moveHandle;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Content")]
+#endif
+        [SerializeField, Tooltip("Presses inside these rects never start the content/window drag — manual exceptions for areas with their own drag gestures that are neither Selectables nor ScrollRects. Inactive objects are skipped; AddDragException/RemoveDragException manage the list at runtime.")]
+        private List<RectTransform> _dragExceptionRects = new List<RectTransform>();
 
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
@@ -1033,17 +1039,23 @@ namespace BIG.Unity.Overlay
         private static readonly List<RaycastResult> RAYCAST_RESULTS = new List<RaycastResult>(16);
 
         /// <summary>
-        /// True when the press landed on a widget that claims the gesture for itself — those
-        /// always win over the content drag. Two families, checked on the TOP raycast hit only
-        /// (the element that actually receives the uGUI events):
-        /// Selectables (button, slider, toggle, dropdown...), and anything with an
-        /// <see cref="IDragHandler"/> in its parents — a ScrollRect viewport first of all, so
-        /// panning a scroll view (progression tree, stash list) scrolls the CONTENT instead of
-        /// dragging the window. A custom "no window drag here" zone needs no plugin support:
-        /// give the rect any IDragHandler (an empty one suffices).
+        /// True when the press landed on something that claims the gesture for itself — those
+        /// always win over the content drag. Three families:
+        /// Selectables (button, slider, toggle, dropdown...) and SCROLL VIEWS (a press anywhere
+        /// inside a ScrollRect — its layout groups, rows, grids — pans the scroll content, not
+        /// the window), both checked on the TOP raycast hit only (the element that actually
+        /// receives the uGUI events); plus the manual Drag Exception rects (plain geometry,
+        /// for areas with custom drag gestures). Deliberately NOT any IDragHandler: that also
+        /// caught game-specific drag components and made whole panels undraggable.
         /// </summary>
         private bool IsOverGestureClaimer(Vector2 screenPoint)
         {
+            foreach (RectTransform rect in _dragExceptionRects)
+            {
+                if (IsOverRect(rect, screenPoint))
+                    return true;
+            }
+
             EventSystem eventSystem = EventSystem.current;
             if (eventSystem == null)
                 return false;
@@ -1057,12 +1069,22 @@ namespace BIG.Unity.Overlay
             {
                 GameObject top = RAYCAST_RESULTS[0].gameObject;
                 over = top.GetComponentInParent<Selectable>() != null
-                    || top.GetComponentInParent<IDragHandler>() != null;
+                    || top.GetComponentInParent<ScrollRect>() != null;
             }
 
             RAYCAST_RESULTS.Clear();
             return over;
         }
+
+        /// <summary> Runtime drag exception: presses inside <paramref name="rect"/> stop starting the window drag. </summary>
+        public void AddDragException(RectTransform rect)
+        {
+            if (rect != null && !_dragExceptionRects.Contains(rect))
+                _dragExceptionRects.Add(rect);
+        }
+
+        /// <summary> Removes a rect added with <see cref="AddDragException"/> (or set in the inspector). </summary>
+        public void RemoveDragException(RectTransform rect) => _dragExceptionRects.Remove(rect);
 
         #endregion
     }
