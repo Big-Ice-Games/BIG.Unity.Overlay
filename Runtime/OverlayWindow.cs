@@ -585,21 +585,48 @@ namespace BIG.Unity.Overlay
         }
 
         // ---- Zoom (FitContent) ----
-        // 2026-10-25 (user): the window follows the content EXACTLY on every scroll notch — no
-        // growth headroom (its empty margin read as a black band while zooming in) and no delayed
-        // shrink 0.6 s after the wheel rested (that late resize was the visible blink). The
-        // previous "zoom inside an oversized window, settle later" variant is in the 2026-10-17
-        // history if the per-notch resize ever blinks again.
+        // EVERY OS-window resize of the transparent window shows one empty frame — nothing smooths
+        // that, so a zoom must resize as RARELY as possible (2026-10-25, after both variants blinked:
+        // the per-notch exact fit blinked on every notch, the "grow with headroom + shrink 0.6 s after
+        // the wheel rests" variant blinked at the late shrink):
+        // - zooming OUT never resizes: the content shrinks inside the window, the margin is
+        //   transparent (and click-through — the hit area is the content, not the window);
+        // - zooming IN resizes only when the content no longer fits, straight to a generous size
+        //   (headroom, capped below the monitor-size zone where DWM drops the alpha), so the next
+        //   notches — and every later zoom in the same range — fit without a resize;
+        // - the window never shrinks back during the session; the saved spot/scale are the exact
+        //   fit (FittedWindowPosition), so the next launch starts tight again.
 
-        /// <summary> The window's real size (physical px) — the exact content fit (WindowSizeFor). </summary>
+        /// <summary> The window's real size (physical px) — may exceed the content fit after a zoom. </summary>
         private Vector2 _windowSize;
+        private const float ZOOM_GROW_HEADROOM = 1.5f;
+        /// <summary> The headroom alone never grows the window past this share of the work area (DWM black-backdrop zone). </summary>
+        private const float ZOOM_HEADROOM_MONITOR_CAP = 0.8f;
 
-        /// <summary> One scroll notch: the content rescales and the window resizes to wrap it, around its center. </summary>
+        /// <summary> One scroll notch: the content rescales around the window center; the window grows only when it must. </summary>
         private void ZoomInsideWindow(float clamped)
         {
             Vector2 center = _windowUniwinPosition + _windowSize * 0.5f;
-            Vector2 exact = WindowSizeFor(clamped);
-            ApplyWindowRect(center - exact * 0.5f, clamped);
+            Vector2 needed = WindowSizeFor(clamped);
+            _scale = clamped;
+            if (_content != null)
+                _content.localScale = new Vector3(_scale, _scale, 1f);
+
+            if (needed.x > _windowSize.x || needed.y > _windowSize.y)
+            {
+                Rect area = ResolveWorkArea(0);
+                Vector2 grown = needed * ZOOM_GROW_HEADROOM;
+                if (area.width > 0f && area.height > 0f)
+                {
+                    grown = new Vector2(Mathf.Min(grown.x, area.width * ZOOM_HEADROOM_MONITOR_CAP),
+                        Mathf.Min(grown.y, area.height * ZOOM_HEADROOM_MONITOR_CAP));
+                }
+                grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
+                SetWindowRect(center - grown * 0.5f, grown);
+            }
+
+            CenterContent();
+            _stateDirty = true;
         }
 
         /// <summary> The window spot an EXACT content fit would have (what saves/restores use while a zoom settles). </summary>
@@ -830,7 +857,7 @@ namespace BIG.Unity.Overlay
             if (_dragging)
             {
                 if (FitsContent)
-                    ApplyWindowRect(_dragStartWindowPosition, _scale);
+                    SetWindowRect(_dragStartWindowPosition, _windowSize); // position only — a resize would blink
                 else if (_content != null)
                     _content.anchoredPosition = _dragStartContentPosition;
             }
