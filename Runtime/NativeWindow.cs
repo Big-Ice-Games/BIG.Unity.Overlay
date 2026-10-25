@@ -59,12 +59,47 @@ namespace BIG.Unity.Overlay
         [DllImport("user32.dll")]
         private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
 
+        private const int GWL_STYLE = -16;
+        private const long WS_POPUP = 0x80000000L;
+        private const long WS_FRAME_BITS = 0x00C00000L /* CAPTION (= BORDER | DLGFRAME) */ | 0x00040000L /* THICKFRAME */
+                                           | 0x00080000L /* SYSMENU */ | 0x00020000L /* MINIMIZEBOX */ | 0x00010000L /* MAXIMIZEBOX */;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_FRAMECHANGED = 0x0020;
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")]
+        private static extern IntPtr GetWindowLongPtr64(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")]
+        private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr value);
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLongW")]
+        private static extern int GetWindowLong32(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLongW")]
+        private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int value);
+
+        /// <summary>
+        /// The player window. GetActiveWindow only answers while ours is the active window, so the
+        /// handle is remembered from the first call that saw it (boot: ParkOffScreen).
+        /// </summary>
+        private static IntPtr s_window;
+
+        private static IntPtr PlayerWindow
+        {
+            get
+            {
+                IntPtr active = GetActiveWindow();
+                if (active != IntPtr.Zero) s_window = active;
+                return s_window;
+            }
+        }
+
         /// <summary>
         /// Park the window far off-screen so the user never sees the flash of a not-yet-transparent window.
         /// </summary>
         public static void ParkOffScreen()
         {
-            SetWindowPos(GetActiveWindow(), IntPtr.Zero, -32000, -32000, 0, 0,
+            SetWindowPos(PlayerWindow, IntPtr.Zero, -32000, -32000, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         }
 
@@ -74,8 +109,36 @@ namespace BIG.Unity.Overlay
         /// </summary>
         public static void EmergencyShow()
         {
-            SetWindowPos(GetActiveWindow(), IntPtr.Zero, 100, 100, 0, 0,
+            SetWindowPos(PlayerWindow, IntPtr.Zero, 100, 100, 0, 0,
                 SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        /// <summary>
+        /// Strips the caption and the frame (WS_POPUP) — fullscreen mode: UniWinC restores the original
+        /// decorated style when transparency goes OFF, which showed a Windows title bar over the game.
+        /// Turning transparency back on re-applies UniWinC's own borderless style, so nothing undoes this.
+        /// </summary>
+        public static void MakeBorderless()
+        {
+            IntPtr window = PlayerWindow;
+            if (window == IntPtr.Zero)
+                return;
+
+            if (IntPtr.Size == 8)
+            {
+                long style = GetWindowLongPtr64(window, GWL_STYLE).ToInt64();
+                style = (style & ~WS_FRAME_BITS) | WS_POPUP;
+                SetWindowLongPtr64(window, GWL_STYLE, new IntPtr(style));
+            }
+            else
+            {
+                long style = (uint)GetWindowLong32(window, GWL_STYLE);
+                style = (style & ~WS_FRAME_BITS) | WS_POPUP;
+                SetWindowLong32(window, GWL_STYLE, unchecked((int)style));
+            }
+
+            // Re-layout the non-client area so the client fills the whole window rect.
+            SetWindowPos(window, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
         }
 
         /// <summary>
@@ -133,6 +196,7 @@ namespace BIG.Unity.Overlay
         }
 #else
         public static void ParkOffScreen() { }
+        public static void MakeBorderless() { }
         public static void EmergencyShow() { }
 
         public static bool TryGetWorkAreaForMonitor(Rect uniwinMonitorRect, out Rect workArea)

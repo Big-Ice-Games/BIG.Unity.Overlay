@@ -430,6 +430,8 @@ namespace BIG.Unity.Overlay
             Rect monitor = UniWindowController.GetMonitorRect(MonitorUnderWindow());
 
             _uniWindowController.isTransparent = false;
+            // UniWinC brings the decorated style (title bar, frame) back with transparency off — strip it.
+            NativeWindow.MakeBorderless();
             Camera camera = _uniWindowController.currentCamera;
             if (camera != null)
             {
