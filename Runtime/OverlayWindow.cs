@@ -362,7 +362,6 @@ namespace BIG.Unity.Overlay
             if (FitsContent && _hitAreaActive)
             {
                 CenterContent();
-                UpdateZoomSettle();
             }
 
             if (!_hitAreaActive)
@@ -446,7 +445,6 @@ namespace BIG.Unity.Overlay
             _windowSize = monitor.size;
             _uniWindowController.windowSize = monitor.size;
             _uniWindowController.windowPosition = monitor.position;
-            _zoomSettlePending = false;
 
             if (_content != null && _content.rect.width > 0f && _content.rect.height > 0f)
             {
@@ -561,7 +559,6 @@ namespace BIG.Unity.Overlay
         {
             _scale = Mathf.Clamp(scale, _minScale, MaxScaleNow());
             SetWindowRect(uniwinPosition, WindowSizeFor(_scale));
-            _zoomSettlePending = false;
 
             if (_content != null)
                 _content.localScale = new Vector3(_scale, _scale, 1f);
@@ -587,63 +584,22 @@ namespace BIG.Unity.Overlay
                 _uniWindowController.isTransparent = true;
         }
 
-        // ---- Zoom without blinking (FitContent) ----
-        // Resizing a transparent window makes Unity show one empty frame (the desktop shines
-        // through) — once per scroll notch that read as constant blinking. Zoom now scales the
-        // content INSIDE the current window; the window only GROWS (with headroom, so the next
-        // notches fit) when the content outgrows it, and shrinks back once, after the wheel
-        // has rested — and only when the leftover margin is worth a blink.
+        // ---- Zoom (FitContent) ----
+        // 2026-10-25 (user): the window follows the content EXACTLY on every scroll notch — no
+        // growth headroom (its empty margin read as a black band while zooming in) and no delayed
+        // shrink 0.6 s after the wheel rested (that late resize was the visible blink). The
+        // previous "zoom inside an oversized window, settle later" variant is in the 2026-10-17
+        // history if the per-notch resize ever blinks again.
 
-        /// <summary> The window's real size (physical px) — may exceed the content fit while a zoom settles. </summary>
+        /// <summary> The window's real size (physical px) — the exact content fit (WindowSizeFor). </summary>
         private Vector2 _windowSize;
-        private bool _zoomSettlePending;
-        private float _zoomSettleAt;
-        private const float ZOOM_GROW_HEADROOM = 1.4f;
-        /// <summary> The headroom alone never grows the window past this share of the monitor (DWM black-backdrop zone). </summary>
-        private const float ZOOM_HEADROOM_MONITOR_CAP = 0.8f;
-        private const float ZOOM_SHRINK_THRESHOLD = 1.15f;
-        private const float ZOOM_SETTLE_SECONDS = 0.6f;
 
+        /// <summary> One scroll notch: the content rescales and the window resizes to wrap it, around its center. </summary>
         private void ZoomInsideWindow(float clamped)
         {
             Vector2 center = _windowUniwinPosition + _windowSize * 0.5f;
-            Vector2 needed = WindowSizeFor(clamped);
-            _scale = clamped;
-            if (_content != null)
-                _content.localScale = new Vector3(_scale, _scale, 1f);
-
-            if (needed.x > _windowSize.x || needed.y > _windowSize.y)
-            {
-                // Zooming IN: grow with a generous headroom (3-4 notches fit before the next
-                // resize) but NEVER near monitor size from the headroom alone — a ~monitor-sized
-                // window makes DWM drop the alpha composition (black backdrop; growing straight
-                // to the work area showed exactly that). Only the content need itself may go there.
-                Rect area = ResolveWorkArea(0);
-                Vector2 grown = needed * ZOOM_GROW_HEADROOM;
-                if (area.width > 0f && area.height > 0f)
-                {
-                    grown = new Vector2(Mathf.Min(grown.x, area.width * ZOOM_HEADROOM_MONITOR_CAP),
-                        Mathf.Min(grown.y, area.height * ZOOM_HEADROOM_MONITOR_CAP));
-                }
-                grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
-                SetWindowRect(center - grown * 0.5f, grown);
-            }
-
-            CenterContent();
-            _zoomSettlePending = true;
-            _zoomSettleAt = Time.unscaledTime + ZOOM_SETTLE_SECONDS;
-            _stateDirty = true;
-        }
-
-        /// <summary> After the wheel rested: shrink an oversized window back around its center (one resize at most). </summary>
-        private void UpdateZoomSettle()
-        {
-            if (!_zoomSettlePending || Time.unscaledTime < _zoomSettleAt)
-                return;
-            _zoomSettlePending = false;
-            Vector2 exact = WindowSizeFor(_scale);
-            if (_windowSize.x > exact.x * ZOOM_SHRINK_THRESHOLD || _windowSize.y > exact.y * ZOOM_SHRINK_THRESHOLD)
-                SetWindowRect(_windowUniwinPosition + (_windowSize - exact) * 0.5f, exact);
+            Vector2 exact = WindowSizeFor(clamped);
+            ApplyWindowRect(center - exact * 0.5f, clamped);
         }
 
         /// <summary> The window spot an EXACT content fit would have (what saves/restores use while a zoom settles). </summary>
