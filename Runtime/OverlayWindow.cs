@@ -63,10 +63,15 @@ namespace BIG.Unity.Overlay
         public static readonly UserDataKey PositionY = new UserDataKey("OVERLAY_POS_Y");
         public static readonly UserDataKey Scale = new UserDataKey("OVERLAY_SCALE");
         public static readonly UserDataKey Topmost = new UserDataKey("OVERLAY_TOPMOST");
+        public static readonly UserDataKey Fullscreen = new UserDataKey("OVERLAY_FULLSCREEN");
     }
 
     /// <summary>
     /// The one overlay component.
+    ///
+    /// FULLSCREEN (2026-10-25, <see cref="SetFullscreen"/>, default for new players via Default Fullscreen):
+    /// an opaque window over the whole monitor, the content fitted and centered on black — no drag,
+    /// no scroll zoom, no click-through. Leaving it restores the overlay spot/scale saved on entry.
     ///
     /// WINDOW — two modes (<see cref="OverlayWindowMode"/>):
     /// CoverDesktop (legacy default): an invisible layer stretched over the ENTIRE virtual desktop
@@ -135,6 +140,12 @@ namespace BIG.Unity.Overlay
 #endif
         [SerializeField, Tooltip("On first launch the content fills the primary monitor's work area (scroll shrinks it from there). Off = the content parks in Start Corner instead.")]
         private bool _startFullscreen = true;
+
+#if ODIN_INSPECTOR
+        [FoldoutGroup("Window")]
+#endif
+        [SerializeField, Tooltip("FULLSCREEN MODE for players who never chose: an opaque window covering the whole monitor, the content scaled to fit and centered on black (bars at the sides of a square game). Off = the transparent overlay. The player's choice (SetFullscreen) persists and wins.")]
+        private bool _defaultFullscreen = true;
 
 #if ODIN_INSPECTOR
         [FoldoutGroup("Content")]
@@ -215,6 +226,8 @@ namespace BIG.Unity.Overlay
         private float _scale = 1f;
         private bool _stateDirty;
         private bool _alwaysOnTop = true;
+        private bool _fullscreen;
+        private bool _windowReady; // Start placed the window — mode switches apply live from here on
 
         // FitContent mode: the window's bottom-left in UniWinC coordinates (the one source of
         // truth — the controller's getter can lag a frame behind a just-issued move).
@@ -234,6 +247,9 @@ namespace BIG.Unity.Overlay
         /// <summary> Whether the overlay window stays above all other windows. </summary>
         public bool IsAlwaysOnTop => _alwaysOnTop;
 
+        /// <summary> Fullscreen mode (opaque, monitor-sized, content fitted on black) instead of the transparent overlay. </summary>
+        public bool IsFullscreen => _fullscreen;
+
         protected override void Awake()
         {
             base.Awake();
@@ -249,6 +265,7 @@ namespace BIG.Unity.Overlay
 
             // Read early (Awake, after injection) so settings views see the right state in their Start.
             _alwaysOnTop = _userData.GetBool(OverlayUserDataKeysProvider.Topmost, true);
+            _fullscreen = _userData.GetBool(OverlayUserDataKeysProvider.Fullscreen, _defaultFullscreen);
         }
 
         private IEnumerator Start()
@@ -281,7 +298,15 @@ namespace BIG.Unity.Overlay
             yield return null;
             yield return null;
 
-            if (FitsContent)
+            if (_fullscreen)
+            {
+                EnterFullscreen();
+
+                // Window style changes (borderless/layered) can move the window once more a moment later.
+                yield return new WaitForSecondsRealtime(0.5f);
+                EnterFullscreen();
+            }
+            else if (FitsContent)
             {
                 RestoreWindowPlacement();
 
@@ -300,6 +325,7 @@ namespace BIG.Unity.Overlay
                 CoverVirtualDesktop();
             }
 
+            _windowReady = true;
             _uniWindowController.OnMonitorChanged += HandleMonitorChanged;
         }
 
@@ -318,6 +344,18 @@ namespace BIG.Unity.Overlay
 
         private void Update()
         {
+            // Fullscreen: no drag, no scroll zoom, no click-through — the window is the game. The
+            // canvas still tracks the window size a frame late, so keep the content centered.
+            if (_fullscreen)
+            {
+                if (_windowReady && _uniWindowController != null)
+                {
+                    CenterContent();
+                    _uniWindowController.isClickThrough = false; // re-asserted like the hover flag below
+                }
+                return;
+            }
+
             // FitContent: the canvas tracks the window size with a frame of lag (Screen
             // resolution updates after the resize lands) — keep the content centered every
             // frame instead of chasing callbacks. Idempotent, allocation-free.
@@ -354,6 +392,102 @@ namespace BIG.Unity.Overlay
         }
 
         /// <summary>
+        /// FULLSCREEN vs the transparent overlay. On: the window becomes opaque and covers the whole
+        /// monitor it is on, the content is scaled to fit the monitor and centered on black (a square
+        /// game gets bars at the sides); drag, scroll zoom and click-through are off. Off: back to the
+        /// overlay at the spot and scale the player had before. Persists through <see cref="IUserData"/>.
+        /// </summary>
+        public void SetFullscreen(bool fullscreen)
+        {
+            if (_fullscreen == fullscreen)
+                return;
+
+            _userData.Set(OverlayUserDataKeysProvider.Fullscreen, fullscreen);
+            if (Application.isEditor || !_windowReady || _uniWindowController == null)
+            {
+                _fullscreen = fullscreen; // applied by Start (or never, in the editor)
+                return;
+            }
+
+            if (fullscreen)
+            {
+                // Remember the overlay spot first — SaveContentState is silent while fullscreen.
+                _stateDirty = true;
+                SaveContentState();
+                _fullscreen = true;
+                EnterFullscreen();
+            }
+            else
+            {
+                _fullscreen = false;
+                ExitFullscreen();
+            }
+        }
+
+        /// <summary> Opaque, monitor-sized window; content fitted (letterboxed) and centered. Idempotent. </summary>
+        private void EnterFullscreen()
+        {
+            Rect monitor = UniWindowController.GetMonitorRect(MonitorUnderWindow());
+
+            _uniWindowController.isTransparent = false;
+            Camera camera = _uniWindowController.currentCamera;
+            if (camera != null)
+            {
+                // UniWinC restores the camera's ORIGINAL background when transparency goes off —
+                // the bars must be black whatever the scene camera had.
+                camera.clearFlags = CameraClearFlags.SolidColor;
+                camera.backgroundColor = Color.black;
+            }
+            _uniWindowController.isClickThrough = false;
+
+            _windowUniwinPosition = monitor.position;
+            _windowSize = monitor.size;
+            _uniWindowController.windowSize = monitor.size;
+            _uniWindowController.windowPosition = monitor.position;
+            _zoomSettlePending = false;
+
+            if (_content != null && _content.rect.width > 0f && _content.rect.height > 0f)
+            {
+                _scale = Mathf.Min(monitor.width / _content.rect.width, monitor.height / _content.rect.height);
+                _content.localScale = new Vector3(_scale, _scale, 1f);
+            }
+            CenterContent();
+        }
+
+        /// <summary> Back to the transparent overlay at the saved spot and scale (or the start placement). </summary>
+        private void ExitFullscreen()
+        {
+            _uniWindowController.isTransparent = true;
+            _uniWindowController.isClickThrough = true;
+            _lastClickThrough = true;
+
+            if (FitsContent)
+            {
+                RestoreWindowPlacement();
+            }
+            else
+            {
+                if (_content != null)
+                    _content.localScale = Vector3.one;
+                CoverVirtualDesktop();
+                PositionContent();
+            }
+        }
+
+        /// <summary> Index of the monitor holding the window's center (FitContent) — else the primary one. </summary>
+        private int MonitorUnderWindow()
+        {
+            Vector2 center = _windowUniwinPosition + _windowSize * 0.5f;
+            int count = UniWindowController.GetMonitorCount();
+            for (int i = 0; i < count; i++)
+            {
+                if (UniWindowController.GetMonitorRect(i).Contains(center))
+                    return i;
+            }
+            return 0;
+        }
+
+        /// <summary>
         /// Stretch the invisible window over the bounding box of ALL monitors. The window never moves
         /// afterwards — the content does — so there is nothing to flicker.
         /// </summary>
@@ -380,6 +514,12 @@ namespace BIG.Unity.Overlay
 
         private void HandleMonitorChanged()
         {
+            if (_fullscreen)
+            {
+                EnterFullscreen(); // re-fit to the (possibly new) monitor
+                return;
+            }
+
             if (FitsContent)
             {
                 // When the monitor with the window got detached, pull it back to the start placement.
@@ -894,7 +1034,8 @@ namespace BIG.Unity.Overlay
         /// <summary> Persists content position and scale — restored on the next launch. Called automatically after drag/scale. </summary>
         public void SaveContentState()
         {
-            if (Application.isEditor || _content == null || !_stateDirty)
+            // Fullscreen keeps the OVERLAY spot that was saved when it was entered.
+            if (Application.isEditor || _content == null || !_stateDirty || _fullscreen)
                 return;
 
             _stateDirty = false;
