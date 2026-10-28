@@ -344,6 +344,15 @@ namespace BIG.Unity.Overlay
 
         private void Update()
         {
+            // A zoom GROW resized the window: DWM may have dropped the alpha composition (the new margin
+            // stayed BLACK — SnapDungeon playtest 2026-10-28). Re-assert transparency once more a frame
+            // after the resize, when the swapchain has settled (see ZoomInsideWindow).
+            if (_reassertTransparencyFrames > 0 && --_reassertTransparencyFrames == 0
+                && _uniWindowController != null && _uniWindowController.isTransparent)
+            {
+                _uniWindowController.isTransparent = true;
+            }
+
             // Fullscreen: no drag, no scroll zoom, no click-through — the window is the game. The
             // canvas still tracks the window size a frame late, so keep the content centered.
             if (_fullscreen)
@@ -600,6 +609,8 @@ namespace BIG.Unity.Overlay
         /// <summary> The window's real size (physical px) — may exceed the content fit after a zoom. </summary>
         private Vector2 _windowSize;
         private const float ZOOM_GROW_HEADROOM = 1.5f;
+        /// <summary> Frames until the deferred transparency re-assert after a zoom grow (0 = none pending). </summary>
+        private int _reassertTransparencyFrames;
         /// <summary> The headroom alone never grows the window past this share of the work area (DWM black-backdrop zone). </summary>
         private const float ZOOM_HEADROOM_MONITOR_CAP = 0.8f;
 
@@ -623,6 +634,14 @@ namespace BIG.Unity.Overlay
                 }
                 grown = new Vector2(Mathf.Round(Mathf.Max(grown.x, needed.x)), Mathf.Round(Mathf.Max(grown.y, needed.y)));
                 SetWindowRect(center - grown * 0.5f, grown);
+                // A grow is RARE (grow-only with headroom), so its one re-composition blink is acceptable —
+                // without it the freshly grown margin could stay black (DWM dropped the alpha). Now and once
+                // more a couple of frames later (Update), after the swapchain resize settled.
+                if (_uniWindowController.isTransparent)
+                {
+                    _uniWindowController.isTransparent = true;
+                    _reassertTransparencyFrames = 2;
+                }
             }
 
             CenterContent();
